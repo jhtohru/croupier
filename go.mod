@@ -3,6 +3,7 @@ module github.com/jhtohru/croupier
 go 1.26.0
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/text v0.42.0
 )

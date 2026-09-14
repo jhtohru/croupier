@@ -39,14 +39,15 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[!]` `FromMinorUnits(currency string, amount int64) (Money, error)`: reconstrói Money a partir de dado já confiável (ex.: linha do Postgres escaneada via pgx), sem parsing de string — necessário porque os campos de Money são privados e a coluna no banco será `BIGINT`, não uma string formatada (consumido a partir da Fase 6)
 - [x] `[!]` Testes unitários: parsing válido/inválido, aritmética, limites (overflow), mismatch de moeda, escala — `go test -race -count=1 ./...` passando
 - [ ] `[o]` Refatorar `money_test.go` pro padrão de testes de tabela adotado a partir da Fase 2 em diante (baixa prioridade — só depois de fechar os itens `[!]`)
+- [ ] `[o]` Introduzir `const brl = "BRL"` (não exportado) em `money_test.go` pra substituir as ~122 ocorrências do literal `"BRL"` — reduz repetição e elimina risco de typo silencioso na moeda; não colocar em `money.go` (pacote é agnóstico de moeda de propósito)
 - [x] `[doc]` ARCHITECTURE.md → "Representação de dinheiro (Money)"
 
 ## Fase 2 — internal/wallet (modelo)
-- [ ] `[!]` `Wallet` aggregate: id, `(playerId, currency)`, balance (`Money`), version (inicia em 1), timestamps
-- [ ] `[!]` Invariante: débito não pode deixar saldo negativo
-- [ ] `[!]` Version incrementa **somente** quando o saldo muda
-- [ ] `[!]` Testes unitários: invariantes de saldo, incremento de versão, casos de borda (débito exato do saldo, débito > saldo)
-- [ ] `[doc]` ARCHITECTURE.md → "Wallet e invariantes de saldo"
+- [x] `[!]` `Wallet` aggregate: id, `(playerId, currency)`, balance (`Money`), version (inicia em 1), timestamps — currency vem de `balance.Currency()`, sem campo redundante
+- [x] `[!]` Invariante: débito não pode deixar saldo negativo — `Debit` retorna `ErrInsufficientBalance`; `New` retorna `ErrNegativeInitialBalance`
+- [x] `[!]` Version incrementa **somente** quando o saldo muda — implementado em `Credit`/`Debit` (só incrementa após mutação de saldo confirmada)
+- [x] `[!]` Testes unitários: invariantes de saldo, incremento de versão, casos de borda (débito exato do saldo, saldo insuficiente, overflow) — `go test -race -count=1 ./...` passando
+- [x] `[doc]` ARCHITECTURE.md → "Wallet e invariantes de saldo"
 
 ## Fase 3 — internal/wager (modelo) + WalletLedgerEntry
 - [ ] `[!]` `WagerTransaction`: tipos OPENING/BET/WIN/LOSS/REFUND/ROLLBACK; estados PENDING → PROCESSED/REJECTED/FAILED (e PENDING_REFERENCE)
@@ -81,6 +82,7 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 
 ## Fase 6 — internal/postgres
 - [ ] `[!]` Migrations versionadas (apply/rollback documentados) — schema com uniqueness, non-negativity (constraint de saldo), imutabilidade do ledger
+- [ ] `[!]` **Dependência da decisão de `wallet.FromPersistence`/`ReHydrate` não revalidar dados vindos do banco**: a tabela `wallets` precisa de `CHECK (balance >= 0)`, `CHECK (version >= 1)` e `NOT NULL` em `id`/`player_id`/`created_at`/`updated_at` — sem essas constraints, não sobra nenhuma garantia desses invariantes em lugar nenhum (nem no domínio, nem no banco)
 - [ ] `[!]` Implementação de `wallet.Repository`, `wager.Repository`, repositórios de inbox/outbox com `pgx` e SQL explícito (transações, locks, constraints verificáveis)
 - [ ] `[!]` Outbox transacional: estado da transação + saldo + ledger + inbox + evento confirmados na mesma transação SQL
 - [ ] `[!]` Testes de integração com Postgres real (Docker) — sem mocks completos

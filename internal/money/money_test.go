@@ -404,15 +404,67 @@ func TestMoneyIsNegative(t *testing.T) {
 	})
 }
 
-func TestMoneyMarshalJSON(t *testing.T) {
+func TestMoneyIsPositive(t *testing.T) {
 	t.Run("positive", func(t *testing.T) {
+		m := Money{"BRL", 1}
+		assert.True(t, m.IsPositive())
+	})
+
+	t.Run("zero", func(t *testing.T) {
+		m := Money{"BRL", 0}
+		assert.False(t, m.IsPositive())
+	})
+
+	t.Run("negative", func(t *testing.T) {
+		m := Money{"BRL", -1}
+		assert.False(t, m.IsPositive())
+	})
+}
+
+func TestMoneyMarshalJSON(t *testing.T) {
+	t.Run("zero", func(t *testing.T) {
+		m := Money{"BRL", 0}
+		b, err := json.Marshal(m)
+		assert.NoError(t, err)
+		assert.JSONEq(t, `{"currency": "BRL", "amount": "0.00"}`, string(b))
+	})
+
+	t.Run("R$0.01", func(t *testing.T) {
+		m := Money{"BRL", 1}
+		b, err := json.Marshal(m)
+		assert.NoError(t, err)
+		assert.JSONEq(t, `{"currency": "BRL", "amount": "0.01"}`, string(b))
+	})
+
+	t.Run("R$0.10", func(t *testing.T) {
+		m := Money{"BRL", 10}
+		b, err := json.Marshal(m)
+		assert.NoError(t, err)
+		assert.JSONEq(t, `{"currency": "BRL", "amount": "0.10"}`, string(b))
+	})
+
+	t.Run("R$1.00", func(t *testing.T) {
+		m := Money{"BRL", 100}
+		b, err := json.Marshal(m)
+		assert.NoError(t, err)
+		assert.JSONEq(t, `{"currency": "BRL", "amount": "1.00"}`, string(b))
+	})
+
+	t.Run("R$123.45", func(t *testing.T) {
 		m := Money{"BRL", 12345}
 		b, err := json.Marshal(m)
 		assert.NoError(t, err)
 		assert.JSONEq(t, `{"currency": "BRL", "amount": "123.45"}`, string(b))
 	})
 
-	t.Run("negative", func(t *testing.T) {
+	t.Run("-R$0.01", func(t *testing.T) {
+		m := Money{"BRL", -1}
+		b, err := json.Marshal(m)
+		assert.NoError(t, err)
+		assert.JSONEq(t, `{"currency": "BRL", "amount": "-0.01"}`, string(b))
+	})
+
+	t.Run("-R$123.45", func(t *testing.T) {
 		m := Money{"BRL", -12345}
 		b, err := json.Marshal(m)
 		assert.NoError(t, err)

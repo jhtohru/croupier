@@ -35,7 +35,21 @@ Exceção deliberada: a string `"-0.00"` é rejeitada mesmo batendo na regex. "Z
 
 ## Wallet e invariantes de saldo
 
-_(Fase 2)_
+`Wallet` (`internal/wallet`) é o aggregate root identificado por `(playerId, currency)` — não existe um campo `currency` redundante na struct; a moeda é sempre `balance.Currency()`. Campos privados (`id`, `playerId`, `version`, `balance`, `createdAt`, `updatedAt`), expostos só por getters — a única forma de mutar o saldo é através dos métodos `Credit`/`Debit` do próprio agregado.
+
+**O invariante de saldo não-negativo mora no agregado, não no caso de uso.** Isso é uma escolha deliberadamente diferente da que fizemos pra `Money`: lá, "não pode ser negativo" era uma regra de um contexto de negócio específico (`WagerTransaction`), porque `Money` é usado em vários contextos onde negativo é legítimo (ex.: `difference` de reconciliação). Aqui não há contexto nenhum em que uma `Wallet` válida possa ter saldo negativo — é o que define uma `Wallet` válida, sempre. Por isso a checagem fica dentro de `Credit`/`Debit`/`New`, tornando um saldo negativo estruturalmente impossível de existir em memória, em vez de depender de todo caso de uso lembrar de checar antes de mutar.
+
+**Dois erros de saldo distintos, de propósito:**
+- `ErrNegativeInitialBalance` (em `New`): saldo inicial inválido na criação da wallet — checagem estrutural de entrada.
+- `ErrInsufficientBalance` (em `Debit`): o resultado de um débito específico deixaria o saldo negativo — resultado de uma operação de negócio.
+
+Mantê-los separados (em vez de reaproveitar um erro genérico) é necessário porque a Fase 3 exige failure codes distintos pra "BET com saldo insuficiente" vs. "reversão que excede saldo" — a distinção semântica já nasce aqui, no nível da `Wallet`.
+
+**`Credit`/`Debit` exigem `amount` estritamente positivo** (`ErrNonPositiveAmount`, rejeita zero e negativo). Dois motivos: (1) a direção do movimento é decidida por qual método é chamado, não pelo sinal do valor — aceitar negativo em `Credit` abriria uma forma de debitar sem passar pela checagem de saldo suficiente de `Debit`; (2) protege o invariante "version só incrementa quando o saldo muda" — um valor zero seria um "movimento" que não movimenta nada, e não deveria conseguir incrementar a versão.
+
+**Version incrementa só em mutação bem-sucedida.** `Credit`/`Debit` só executam `w.version++` depois que a operação de saldo (`Add`/`Subtract`) é confirmada sem erro — qualquer falha (moeda incompatível, overflow, saldo insuficiente, amount não-positivo) retorna antes de tocar em `balance` ou `version`. `version` existe também como preparação pra a estratégia de concorrência otimista que será decidida na Fase 5.
+
+**`FromPersistence` não revalida os dados.** Ao contrário de `New`, que é a porta de entrada para dado não confiável, `FromPersistence` assume que o dado já passou pela escrita (e, portanto, pelas constraints do schema) — reconstituir e revalidar de novo seria redundante. Essa decisão cria uma dependência explícita com a Fase 6: a tabela `wallets` precisa de `CHECK (balance >= 0)`, `CHECK (version >= 1)` e `NOT NULL` em `id`/`player_id`/`created_at`/`updated_at`, senão nenhuma camada garante esses invariantes pra dado lido de volta do banco.
 
 ## WagerTransaction, estados e tipos
 

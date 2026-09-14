@@ -99,6 +99,10 @@ func (m Money) IsNegative() bool {
 	return m.amount < 0
 }
 
+func (m Money) IsPositive() bool {
+	return m.amount > 0
+}
+
 func (m Money) MarshalJSON() ([]byte, error) {
 	return json.Marshal(moneyJSON{
 		Currency: m.currency,
