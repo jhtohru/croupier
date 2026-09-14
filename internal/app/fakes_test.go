@@ -64,6 +64,43 @@ func (r *fakeWalletRepository) FindLedgerEntryByTransactionID(ctx context.Contex
 	return nil, ErrLedgerEntryNotFound
 }
 
+func (r *fakeWalletRepository) AllLedgerEntries(ctx context.Context, walletID uuid.UUID) ([]*wallet.LedgerEntry, error) {
+	var result []*wallet.LedgerEntry
+	for _, e := range r.ledger {
+		if e.WalletID() == walletID {
+			result = append(result, e)
+		}
+	}
+	return result, nil
+}
+
+func (r *fakeWalletRepository) ListLedgerEntries(ctx context.Context, walletID uuid.UUID, cursor *uuid.UUID, limit int) ([]*wallet.LedgerEntry, error) {
+	var all []*wallet.LedgerEntry
+	for _, e := range r.ledger {
+		if e.WalletID() == walletID {
+			all = append(all, e)
+		}
+	}
+	start := 0
+	if cursor != nil {
+		start = len(all)
+		for i, e := range all {
+			if e.ID() == *cursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	if start > len(all) {
+		start = len(all)
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[start:end], nil
+}
+
 type fakeWagerRepository struct {
 	transactions []*wager.Transaction
 }
@@ -71,6 +108,15 @@ type fakeWagerRepository struct {
 func (r *fakeWagerRepository) Save(ctx context.Context, tx *wager.Transaction) error {
 	r.transactions = append(r.transactions, tx)
 	return nil
+}
+
+func (r *fakeWagerRepository) FindByID(ctx context.Context, id uuid.UUID) (*wager.Transaction, error) {
+	for _, tx := range r.transactions {
+		if tx.ID() == id {
+			return tx, nil
+		}
+	}
+	return nil, ErrWagerTransactionNotFound
 }
 
 func (r *fakeWagerRepository) FindByProviderAndExternalID(ctx context.Context, providerID, externalTransactionID string) (*wager.Transaction, error) {

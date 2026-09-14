@@ -91,15 +91,26 @@ Ambas exigem referência obrigatória (`ErrMissingReference` se ausente) e rever
 
 ## Idempotência
 
-_(Fase 5)_
+`app.WagerSubmitter.Submit` (compartilhado entre HTTP e SQS — mesmo `SubmitWagerTransactionInput`) resolve idempotência antes de qualquer regra de negócio: constrói a transação candidata via `wager.NewTransaction` (o que já valida forma/sinal) e busca uma existente por `(providerId, externalTransactionId)`.
+
+- **Mesma chave, mesmo conteúdo** (`PayloadHash()` bate): replay idempotente. Devolve a transação já persistida com `idempotentReplay: true` e o **saldo observado no processamento original**, não o atual — via `WalletRepository.FindLedgerEntryByTransactionID`, lendo `BalanceAfter()` daquela entrada específica do ledger, não `Wallet.Balance()` (que pode já ter mudado por outras operações). Testado explicitamente: a suíte move o saldo entre a submissão original e o replay e confirma que o valor devolvido é o antigo.
+- **Mesma chave, conteúdo diferente**: `ErrIdempotencyConflict`.
+- Kinds sem movimento de saldo (`LOSS`, ou qualquer transação que terminou `PENDING_REFERENCE`/`REJECTED`) não têm `LedgerEntry` — nesse caso o replay cai de volta pro saldo atual da wallet (é a melhor resposta disponível, já que não existe um snapshot histórico pra essas).
+- A validação "header `Idempotency-Key` bate com `providerId:externalTransactionId` do corpo" fica na camada HTTP (Fase 7) — `Submit` deriva a chave diretamente dos campos do domínio, não recebe um header separado pra comparar.
 
 ## Referências pendentes (PENDING_REFERENCE)
 
-_(Fase 5)_
+`REFUND`/`ROLLBACK` resolvem a referência buscando por `(providerId, referenceExternalTransactionId)` antes de aplicar qualquer movimento:
+
+- **Não encontrada** → `Transaction.MarkPendingReference()`, salva, devolve status `PENDING_REFERENCE` sem tocar na wallet. Evento `WagerTransactionPendingReference` publicado.
+- **Encontrada, mas inválida** (`ValidateReference` reprova — campos não batem ou tipo incompatível) → `MarkRejected(FailureCodeInvalidReference)`.
+- **Encontrada e válida** → `ResolveReference`, depois checagem de reversão duplicada (`WagerRepository.FindReversal`, busca uma `REFUND`/`ROLLBACK` `PROCESSED` já apontando pra essa mesma referência) — se já existe, `MarkRejected(FailureCodeDuplicateReversal)`.
+
+**O que falta**: o worker que revisita transações em `PENDING_REFERENCE` depois (retry com backoff exponencial até TTL/max attempts, então `REJECTED`) ainda não existe — hoje uma transação parada nesse estado só sai dele se alguém submeter a referência que faltava, disparando um novo processamento de novo; não há resolução automática em background.
 
 ## Estratégia de concorrência
 
-_(Fase 5 — escolha entre lock pessimista, controle otimista com retry ou update condicional atômico, e justificativa)_
+_(ainda não decidido — pessimista, otimista com retry, ou update condicional atômico. Só fica claro na Fase 6, quando `internal/postgres` implementar `WalletRepository.Save` de verdade; os repositórios fake usados nos testes de caso de uso não fazem nenhum controle de concorrência, então essa decisão não pôde ser validada ainda)_
 
 ## Inbox / Outbox
 
