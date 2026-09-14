@@ -209,9 +209,16 @@ func TestPendingReferenceResolverRealPostgres(t *testing.T) {
 	submitter := app.NewWagerSubmitter(walletRepo, wagerRepo, outboxRepo, txManager)
 	resolver := app.NewPendingReferenceResolver(wagerRepo, submitter, 5, time.Hour, time.Minute)
 
-	missingRefID := "bet-1"
+	// Every id below is random per run, not a fixed literal: the integration
+	// suite never truncates the database between runs (every other test in
+	// this file already relies on that by using uuid.New() throughout), so a
+	// fixed (providerId, externalTransactionId) would collide with a row a
+	// previous run left behind and fail with ErrIdempotencyConflict instead
+	// of testing what this test is actually about.
+	providerID := "provider-" + uuid.New().String()
+	missingRefID := "bet-" + uuid.New().String()
 	refundResult, err := submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
-		ProviderID: "provider-a", ExternalTransactionID: "refund-1",
+		ProviderID: providerID, ExternalTransactionID: "refund-" + uuid.New().String(),
 		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
 		Kind: wager.KindRefund, Amount: mustMoney(t, 3000), ReferenceExternalTransactionID: &missingRefID,
 	})
@@ -221,30 +228,33 @@ func TestPendingReferenceResolverRealPostgres(t *testing.T) {
 	// Not due yet: nothing scheduled means "due now" on first sight, so a
 	// resolve attempt right away DOES pick it up — but since the reference
 	// still doesn't exist, it must stay parked and get a future retry time
-	// instead of an immediate one.
-	n, err := resolver.ResolveDue(context.Background(), time.Now(), 10)
+	// instead of an immediate one. ResolveDue's return count isn't asserted
+	// here: it counts every due PENDING_REFERENCE row in the whole table,
+	// not just this test's own, so it's not test-isolated — checking this
+	// transaction's own attempts count directly is.
+	_, err = resolver.ResolveDue(context.Background(), time.Now(), 10)
 	require.NoError(t, err)
-	assert.Equal(t, 1, n)
 	stillParked, err := wagerRepo.FindByID(context.Background(), refundResult.Transaction.ID())
 	require.NoError(t, err)
 	assert.Equal(t, wager.TxStatusPendingReference, stillParked.Status())
+	attemptsAfterFirstResolve := pendingReferenceAttempts(t, pool, refundResult.Transaction.ID())
+	assert.Equal(t, 1, attemptsAfterFirstResolve)
 
-	// Immediately due again would find nothing — the retry was scheduled a
-	// minute out.
-	n, err = resolver.ResolveDue(context.Background(), time.Now(), 10)
+	// Immediately due again must leave this transaction's own attempts count
+	// unchanged — the retry was scheduled a minute out.
+	_, err = resolver.ResolveDue(context.Background(), time.Now(), 10)
 	require.NoError(t, err)
-	assert.Equal(t, 0, n)
+	assert.Equal(t, attemptsAfterFirstResolve, pendingReferenceAttempts(t, pool, refundResult.Transaction.ID()))
 
 	_, err = submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
-		ProviderID: "provider-a", ExternalTransactionID: missingRefID,
+		ProviderID: providerID, ExternalTransactionID: missingRefID,
 		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
 		Kind: wager.KindBet, Amount: mustMoney(t, 3000),
 	})
 	require.NoError(t, err)
 
-	n, err = resolver.ResolveDue(context.Background(), time.Now().Add(2*time.Minute), 10)
+	_, err = resolver.ResolveDue(context.Background(), time.Now().Add(2*time.Minute), 10)
 	require.NoError(t, err)
-	assert.Equal(t, 1, n)
 
 	resolved, err := wagerRepo.FindByID(context.Background(), refundResult.Transaction.ID())
 	require.NoError(t, err)
@@ -260,4 +270,17 @@ func mustMoney(t *testing.T, minorUnits int64) money.Money {
 	m, err := money.FromMinorUnits("BRL", minorUnits)
 	require.NoError(t, err)
 	return m
+}
+
+// pendingReferenceAttempts reads a transaction's retry bookkeeping directly
+// via SQL — there's no repository method for it (it's not something the app
+// layer needs to ask for on its own), but it's the only way to assert on
+// this test's own transaction without depending on ResolveDue's return
+// count, which reflects every due row in the table, not just this test's.
+func pendingReferenceAttempts(t *testing.T, pool *pgxpool.Pool, id uuid.UUID) int {
+	t.Helper()
+	var attempts int
+	err := pool.QueryRow(context.Background(), `SELECT pending_reference_attempts FROM wager_transactions WHERE id = $1`, id).Scan(&attempts)
+	require.NoError(t, err)
+	return attempts
 }
