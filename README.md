@@ -72,10 +72,18 @@ _(a preencher na Fase 7)_
 
 ## Rodando os testes
 
-_(a preencher na Fase 13)_
+_(a preencher por completo na Fase 13)_
 
 ```sh
 go test ./...
 go test -race ./...
 go vet ./...
+```
+
+Testes de integração de `internal/postgres` (`//go:build integration`) exigem Postgres real com as migrations aplicadas — ver "Migrations" acima:
+```sh
+docker compose up -d postgres
+# aplicar as migrations (comandos na seção "Migrations")
+TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
+  go test -tags integration -race -count=1 ./internal/postgres/...
 ```

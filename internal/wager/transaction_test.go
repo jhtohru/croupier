@@ -316,6 +316,50 @@ func TestNewTransaction(t *testing.T) {
 	})
 }
 
+func TestTransactionFromPersistence(t *testing.T) {
+	refExtID := "ref-ext-1"
+	refTxID := uuid.New()
+	amount, err := money.FromMinorUnits(brl, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := TransactionFromPersistenceInput{
+		ID:                             uuid.New(),
+		Status:                         TxStatusProcessed,
+		Kind:                           KindRefund,
+		ProviderID:                     "provider-a",
+		ExternalTransactionID:          "refund-1",
+		RoundID:                        "round-1",
+		GameID:                         "game-1",
+		PlayerID:                       uuid.New(),
+		WalletID:                       uuid.New(),
+		Amount:                         amount,
+		ReferenceExternalTransactionID: &refExtID,
+		ReferenceTransactionID:         &refTxID,
+		FailureCode:                    FailureCode("SOME_CODE"),
+		CreatedAt:                      time.Now().Add(-time.Hour),
+		UpdatedAt:                      time.Now(),
+	}
+
+	tx := TransactionFromPersistence(input)
+
+	assert.Equal(t, input.ID, tx.ID())
+	assert.Equal(t, input.Status, tx.Status())
+	assert.Equal(t, input.Kind, tx.Kind())
+	assert.Equal(t, input.ProviderID, tx.ProviderID())
+	assert.Equal(t, input.ExternalTransactionID, tx.ExternalTransactionID())
+	assert.Equal(t, input.RoundID, tx.RoundID())
+	assert.Equal(t, input.GameID, tx.GameID())
+	assert.Equal(t, input.PlayerID, tx.PlayerID())
+	assert.Equal(t, input.WalletID, tx.WalletID())
+	assert.Equal(t, input.Amount, tx.Amount())
+	assert.Equal(t, input.ReferenceExternalTransactionID, tx.ReferenceExternalTransactionID())
+	assert.Equal(t, input.ReferenceTransactionID, tx.ReferenceTransactionID())
+	assert.Equal(t, input.FailureCode, tx.FailureCode())
+	assert.Equal(t, input.CreatedAt, tx.CreatedAt())
+	assert.Equal(t, input.UpdatedAt, tx.UpdatedAt())
+}
+
 func TestNewOpeningTransaction(t *testing.T) {
 	validOpeningInput := func(t *testing.T) NewOpeningInput {
 		t.Helper()

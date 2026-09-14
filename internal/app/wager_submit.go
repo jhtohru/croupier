@@ -156,54 +156,74 @@ func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction) (*
 		return nil, err
 	}
 
-	w, err := ws.wallets.FindByID(ctx, tx.WalletID())
-	if err != nil {
-		return nil, err
-	}
+	// The wallet is read, mutated and written inside the same transaction,
+	// with FindByID taking a row lock (see internal/postgres's FOR UPDATE
+	// convention) — required for the mandatory concurrency scenario (two
+	// concurrent BETs against one wallet: the second must see the first's
+	// already-applied debit, not a stale balance read before either
+	// committed). Everything computed from the pre-lock balance (the
+	// rejection branch included) has to happen after the lock is held.
+	var result *SubmitWagerTransactionResult
+	err = ws.txManager.WithinTx(ctx, func(ctx context.Context) error {
+		w, err := ws.wallets.FindByID(ctx, tx.WalletID())
+		if err != nil {
+			return err
+		}
 
-	before := w.Balance()
-	if direction == wallet.DirectionDebit {
-		err = w.Debit(tx.Amount())
-	} else {
-		err = w.Credit(tx.Amount())
-	}
-	if err != nil {
-		if errors.Is(err, wallet.ErrInsufficientBalance) {
+		before := w.Balance()
+		if direction == wallet.DirectionDebit {
+			err = w.Debit(tx.Amount())
+		} else {
+			err = w.Credit(tx.Amount())
+		}
+		if err != nil {
+			if !errors.Is(err, wallet.ErrInsufficientBalance) {
+				return err
+			}
 			code := FailureCodeInsufficientBalance
 			if tx.Kind() != wager.KindBet {
 				code = FailureCodeReversalExceedsBalance
 			}
-			return ws.reject(ctx, tx, code)
+			if err := tx.MarkRejected(code); err != nil {
+				return err
+			}
+			event, err := newWagerTransactionRejectedEvent(tx)
+			if err != nil {
+				return err
+			}
+			if err := ws.wagers.Save(ctx, tx); err != nil {
+				return err
+			}
+			if err := ws.outbox.SaveAll(ctx, event); err != nil {
+				return err
+			}
+			result = &SubmitWagerTransactionResult{Transaction: tx, Balance: w.Balance()}
+			return nil
 		}
-		return nil, err
-	}
 
-	entry, err := wallet.NewLedgerEntry(wallet.NewLedgerEntryInput{
-		WalletID:      w.ID(),
-		TransactionID: tx.ID(),
-		Direction:     direction,
-		Amount:        tx.Amount(),
-		BalanceBefore: before,
-		BalanceAfter:  w.Balance(),
-	})
-	if err != nil {
-		return nil, err
-	}
+		entry, err := wallet.NewLedgerEntry(wallet.NewLedgerEntryInput{
+			WalletID:      w.ID(),
+			TransactionID: tx.ID(),
+			Direction:     direction,
+			Amount:        tx.Amount(),
+			BalanceBefore: before,
+			BalanceAfter:  w.Balance(),
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.MarkProcessed(); err != nil {
+			return err
+		}
+		processedEvent, err := newWagerTransactionProcessedEvent(tx)
+		if err != nil {
+			return err
+		}
+		balanceChangedEvent, err := newWalletBalanceChangedEvent(w, entry)
+		if err != nil {
+			return err
+		}
 
-	if err := tx.MarkProcessed(); err != nil {
-		return nil, err
-	}
-
-	processedEvent, err := newWagerTransactionProcessedEvent(tx)
-	if err != nil {
-		return nil, err
-	}
-	balanceChangedEvent, err := newWalletBalanceChangedEvent(w, entry)
-	if err != nil {
-		return nil, err
-	}
-
-	err = ws.txManager.WithinTx(ctx, func(ctx context.Context) error {
 		if err := ws.wagers.Save(ctx, tx); err != nil {
 			return err
 		}
@@ -213,13 +233,16 @@ func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction) (*
 		if err := ws.wallets.SaveLedgerEntry(ctx, entry); err != nil {
 			return err
 		}
-		return ws.outbox.SaveAll(ctx, processedEvent, balanceChangedEvent)
+		if err := ws.outbox.SaveAll(ctx, processedEvent, balanceChangedEvent); err != nil {
+			return err
+		}
+		result = &SubmitWagerTransactionResult{Transaction: tx, Balance: w.Balance()}
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	return &SubmitWagerTransactionResult{Transaction: tx, Balance: w.Balance()}, nil
+	return result, nil
 }
 
 // movementDirection reports which way the wallet moves for kind. ROLLBACK's

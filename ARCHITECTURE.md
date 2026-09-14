@@ -110,7 +110,17 @@ Ambas exigem referência obrigatória (`ErrMissingReference` se ausente) e rever
 
 ## Estratégia de concorrência
 
-_(ainda não decidido — pessimista, otimista com retry, ou update condicional atômico. Só fica claro na Fase 6, quando `internal/postgres` implementar `WalletRepository.Save` de verdade; os repositórios fake usados nos testes de caso de uso não fazem nenhum controle de concorrência, então essa decisão não pôde ser validada ainda)_
+**Lock pessimista** (`SELECT ... FOR UPDATE`), não otimista com retry nem update condicional atômico.
+
+`internal/postgres.WalletRepository.FindByID` emite `SELECT ... FOR UPDATE` quando chamado dentro de uma transação aberta por `TxManager.WithinTx` (detectado via `context.Context` — uma convenção de pacote: `WithinTx` guarda o `pgx.Tx` ativo no contexto, e todo método de repositório verifica se existe um antes de decidir se usa o pool direto ou a transação). Fora de `WithinTx` (leituras puras como `WalletGetter.Get`, `WalletReconciler.Reconcile`, `WalletLedgerLister.List`), nenhum lock é tomado — só as operações que efetivamente vão mutar a wallet abrem transação.
+
+**Por que pessimista, e não otimista com retry**: a alternativa exigiria reestruturar `WagerSubmitter.process` (e potencialmente `WalletCreator.Create`) com um loop de retry em cima de código já escrito e testado contra fakes — risco desnecessário sob prazo apertado. Lock pessimista, ao contrário, é uma mudança inteiramente contida na camada de repositório mais um ajuste estrutural único: mover a leitura da wallet pra dentro da transação em `WagerSubmitter.process` (antes ela lia fora, mutava em memória, e só a escrita final acontecia dentro de `WithinTx` — não protegia nada contra corrida, já que duas goroutines podiam ler o mesmo saldo antes de qualquer uma escrever).
+
+**Serialização é por linha, não global**: `FOR UPDATE` trava só a linha da wallet específica sendo lida — duas requisições concorrentes contra **wallets diferentes** continuam paralelas, sem nenhum lock compartilhado entre elas.
+
+**Verificado contra Postgres real**, não só por leitura de código: o cenário obrigatório do desafio (wallet com 100.00 BRL recebendo duas apostas concorrentes de 80.00) foi rodado com goroutines de verdade contra um Postgres real via `docker-compose.yml` — resultado consistente em 10 execuções seguidas: uma `PROCESSED`, uma `REJECTED` (`FailureCodeInsufficientBalance`), saldo final 20.00 BRL, exatamente um `LedgerEntry`. Teste em `internal/postgres/integration_test.go` (`TestWagerSubmitterConcurrentBets`, atrás de `//go:build integration`).
+
+**Limitação conhecida, documentada aqui**: `WalletCreator.Create` não abre transação em volta da checagem de duplicidade (`FindByPlayerAndCurrency`) — a proteção real contra duas criações concorrentes da mesma `(playerId, currency)` vem da constraint `UNIQUE (player_id, currency)` do schema, capturada em `WalletRepository.Save` (código Postgres `23505`) e traduzida pra `app.ErrWalletAlreadyExists`. Isso é suficiente pra correção (nenhuma wallet duplicada é possível), mas significa que a checagem prévia é só uma otimização de UX (erro mais específico antes de tentar o insert), não a garantia em si.
 
 ## Inbox / Outbox
 

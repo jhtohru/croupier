@@ -184,6 +184,47 @@ func NewOpeningTransaction(input NewOpeningInput) (*Transaction, error) {
 	}, nil
 }
 
+// TransactionFromPersistenceInput mirrors Transaction's full field set,
+// trusted data coming from storage — no validation here, same reasoning as
+// wallet.FromPersistence.
+type TransactionFromPersistenceInput struct {
+	ID                             uuid.UUID
+	Status                         TxStatus
+	Kind                           Kind
+	ProviderID                     string
+	ExternalTransactionID          string
+	RoundID                        string
+	GameID                         string
+	PlayerID                       uuid.UUID
+	WalletID                       uuid.UUID
+	Amount                         money.Money
+	ReferenceExternalTransactionID *string
+	ReferenceTransactionID         *uuid.UUID
+	FailureCode                    FailureCode
+	CreatedAt                      time.Time
+	UpdatedAt                      time.Time
+}
+
+func TransactionFromPersistence(input TransactionFromPersistenceInput) *Transaction {
+	return &Transaction{
+		id:                             input.ID,
+		status:                         input.Status,
+		kind:                           input.Kind,
+		providerID:                     input.ProviderID,
+		externalTransactionID:          input.ExternalTransactionID,
+		roundID:                        input.RoundID,
+		gameID:                         input.GameID,
+		playerID:                       input.PlayerID,
+		walletID:                       input.WalletID,
+		amount:                         input.Amount,
+		referenceExternalTransactionID: input.ReferenceExternalTransactionID,
+		referenceTransactionID:         input.ReferenceTransactionID,
+		failureCode:                    input.FailureCode,
+		createdAt:                      input.CreatedAt,
+		updatedAt:                      input.UpdatedAt,
+	}
+}
+
 func (tx *Transaction) ResolveReference(id uuid.UUID) error {
 	if tx.status != TxStatusPending && tx.status != TxStatusPendingReference {
 		return ErrInvalidTransition
