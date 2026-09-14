@@ -115,7 +115,7 @@ func NewTransaction(input NewTransactionInput) (*Transaction, error) {
 		if input.ReferenceExternalTransactionID != nil {
 			return nil, ErrUnexpectedReference
 		}
-	case KindWin, KindOpening:
+	case KindWin:
 		if !input.Amount.IsPositive() {
 			return nil, ErrNonPositiveAmount
 		}
@@ -133,6 +133,7 @@ func NewTransaction(input NewTransactionInput) (*Transaction, error) {
 	default:
 		return nil, ErrInvalidKind
 	}
+	now := time.Now()
 	return &Transaction{
 		id:                             uuid.New(),
 		status:                         TxStatusPending,
@@ -145,6 +146,41 @@ func NewTransaction(input NewTransactionInput) (*Transaction, error) {
 		kind:                           input.Kind,
 		amount:                         input.Amount,
 		referenceExternalTransactionID: input.ReferenceExternalTransactionID,
+		createdAt:                      now,
+		updatedAt:                      now,
+	}, nil
+}
+
+// NewOpeningTransaction constructs the OPENING transaction created internally
+// when a wallet is opened with a positive initial balance. Unlike the other
+// kinds, OPENING has no provider, external transaction, round or game — it
+// isn't submitted by a provider, so NewTransaction structurally refuses
+// KindOpening and this is the only way to construct one. It is created
+// already PROCESSED, since it doesn't go through the pending decision flow
+// that provider-submitted transactions do.
+type NewOpeningInput struct {
+	PlayerID uuid.UUID
+	WalletID uuid.UUID
+	Amount   money.Money
+}
+
+func NewOpeningTransaction(input NewOpeningInput) (*Transaction, error) {
+	if input.PlayerID == uuid.Nil || input.WalletID == uuid.Nil {
+		return nil, ErrInvalidInput
+	}
+	if !input.Amount.IsPositive() {
+		return nil, ErrNonPositiveAmount
+	}
+	now := time.Now()
+	return &Transaction{
+		id:        uuid.New(),
+		status:    TxStatusProcessed,
+		kind:      KindOpening,
+		playerID:  input.PlayerID,
+		walletID:  input.WalletID,
+		amount:    input.Amount,
+		createdAt: now,
+		updatedAt: now,
 	}, nil
 }
 
@@ -242,4 +278,64 @@ func (tx *Transaction) MarkFailed(failureCode FailureCode) error {
 	tx.failureCode = failureCode
 	tx.updatedAt = time.Now()
 	return nil
+}
+
+func (tx Transaction) ID() uuid.UUID {
+	return tx.id
+}
+
+func (tx Transaction) Status() TxStatus {
+	return tx.status
+}
+
+func (tx Transaction) ExternalTransactionID() string {
+	return tx.externalTransactionID
+}
+
+func (tx Transaction) ProviderID() string {
+	return tx.providerID
+}
+
+func (tx Transaction) PlayerID() uuid.UUID {
+	return tx.playerID
+}
+
+func (tx Transaction) WalletID() uuid.UUID {
+	return tx.walletID
+}
+
+func (tx Transaction) RoundID() string {
+	return tx.roundID
+}
+
+func (tx Transaction) GameID() string {
+	return tx.gameID
+}
+
+func (tx Transaction) Kind() Kind {
+	return tx.kind
+}
+
+func (tx Transaction) Amount() money.Money {
+	return tx.amount
+}
+
+func (tx Transaction) ReferenceExternalTransactionID() *string {
+	return tx.referenceExternalTransactionID
+}
+
+func (tx Transaction) ReferenceTransactionID() *uuid.UUID {
+	return tx.referenceTransactionID
+}
+
+func (tx Transaction) FailureCode() FailureCode {
+	return tx.failureCode
+}
+
+func (tx Transaction) CreatedAt() time.Time {
+	return tx.createdAt
+}
+
+func (tx Transaction) UpdatedAt() time.Time {
+	return tx.updatedAt
 }

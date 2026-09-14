@@ -26,7 +26,7 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
   cmd/
     croupier/  // main.go, wiring com Fx
   ```
-  Interfaces de repositório ficam definidas dentro do pacote do aggregate que as consome (ex.: `wallet.Repository`), nunca em `internal/postgres` — mantém o domínio livre de dependência de infraestrutura.
+  Interfaces de repositório (`WalletRepository`, `WagerRepository`, `OutboxRepository`, `TxManager`) ficam em `internal/app` — quem as consome de fato é o caso de uso, não o próprio agregado (correção feita na Fase 5: a nota original dizia `wallet.Repository` dentro de `internal/wallet`, mas isso só fazia sentido antes de existir a camada `internal/app`). Nunca em `internal/postgres` — mantém o domínio e o caso de uso livres de dependência de infraestrutura; só o pacote `postgres` (Fase 6) sabe que existe um banco.
 - [ ] `[~]` `.gitignore`, `Makefile` ou scripts auxiliares (opcional, conveniência)
 - [x] `[!]` Iniciar `README.md` e `ARCHITECTURE.md` com esqueleto de seções — feito (ver [README.md](README.md) e [ARCHITECTURE.md](ARCHITECTURE.md))
 

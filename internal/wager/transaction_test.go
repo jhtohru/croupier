@@ -2,6 +2,7 @@ package wager
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -163,6 +164,7 @@ func TestNewTransaction(t *testing.T) {
 		})
 
 		t.Run("success", func(t *testing.T) {
+			start := time.Now()
 			input := validInput(t, KindBet)
 			tx, err := NewTransaction(input)
 			assert.NoError(t, err)
@@ -171,6 +173,9 @@ func TestNewTransaction(t *testing.T) {
 				assert.Equal(t, KindBet, tx.kind)
 				assert.Equal(t, input.Amount, tx.amount)
 				assert.Nil(t, tx.referenceExternalTransactionID)
+				assert.False(t, tx.createdAt.Before(start))
+				assert.True(t, tx.createdAt.Before(time.Now()))
+				assert.Equal(t, tx.createdAt, tx.updatedAt)
 			}
 		})
 	})
@@ -209,27 +214,11 @@ func TestNewTransaction(t *testing.T) {
 		})
 	})
 
-	t.Run("opening", func(t *testing.T) {
-		t.Run("non-positive amount", func(t *testing.T) {
-			input := validInput(t, KindOpening)
-			zero, err := money.Zero(brl)
-			if err != nil {
-				t.Fatal(err)
-			}
-			input.Amount = zero
-			tx, err := NewTransaction(input)
-			assert.ErrorIs(t, err, ErrNonPositiveAmount)
-			assert.Nil(t, tx)
-		})
-
-		t.Run("success", func(t *testing.T) {
-			input := validInput(t, KindOpening)
-			tx, err := NewTransaction(input)
-			assert.NoError(t, err)
-			if assert.NotNil(t, tx) {
-				assert.Equal(t, KindOpening, tx.kind)
-			}
-		})
+	t.Run("opening is rejected", func(t *testing.T) {
+		input := validInput(t, KindOpening)
+		tx, err := NewTransaction(input)
+		assert.ErrorIs(t, err, ErrInvalidKind)
+		assert.Nil(t, tx)
 	})
 
 	t.Run("loss", func(t *testing.T) {
@@ -325,6 +314,116 @@ func TestNewTransaction(t *testing.T) {
 		assert.ErrorIs(t, err, ErrInvalidKind)
 		assert.Nil(t, tx)
 	})
+}
+
+func TestNewOpeningTransaction(t *testing.T) {
+	validOpeningInput := func(t *testing.T) NewOpeningInput {
+		t.Helper()
+		amount, err := money.FromMinorUnits(brl, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NewOpeningInput{
+			PlayerID: uuid.New(),
+			WalletID: uuid.New(),
+			Amount:   amount,
+		}
+	}
+
+	t.Run("nil player id", func(t *testing.T) {
+		input := validOpeningInput(t)
+		input.PlayerID = uuid.Nil
+		tx, err := NewOpeningTransaction(input)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+		assert.Nil(t, tx)
+	})
+
+	t.Run("nil wallet id", func(t *testing.T) {
+		input := validOpeningInput(t)
+		input.WalletID = uuid.Nil
+		tx, err := NewOpeningTransaction(input)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+		assert.Nil(t, tx)
+	})
+
+	t.Run("non-positive amount", func(t *testing.T) {
+		input := validOpeningInput(t)
+		zero, err := money.Zero(brl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.Amount = zero
+		tx, err := NewOpeningTransaction(input)
+		assert.ErrorIs(t, err, ErrNonPositiveAmount)
+		assert.Nil(t, tx)
+	})
+
+	t.Run("success", func(t *testing.T) {
+		input := validOpeningInput(t)
+		tx, err := NewOpeningTransaction(input)
+		assert.NoError(t, err)
+		if assert.NotNil(t, tx) {
+			assert.NotEqual(t, uuid.Nil, tx.id)
+			assert.Equal(t, TxStatusProcessed, tx.status)
+			assert.Equal(t, KindOpening, tx.kind)
+			assert.Equal(t, input.PlayerID, tx.playerID)
+			assert.Equal(t, input.WalletID, tx.walletID)
+			assert.Equal(t, input.Amount, tx.amount)
+			assert.Empty(t, tx.providerID)
+			assert.Empty(t, tx.externalTransactionID)
+			assert.Empty(t, tx.roundID)
+			assert.Empty(t, tx.gameID)
+			assert.Nil(t, tx.referenceExternalTransactionID)
+		}
+	})
+}
+
+func TestTransactionGetters(t *testing.T) {
+	id := uuid.New()
+	playerID := uuid.New()
+	walletID := uuid.New()
+	referenceTransactionID := uuid.New()
+	referenceExternalTransactionID := "ref-ext-1"
+	amount, err := money.FromMinorUnits(brl, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Now().Add(-time.Hour)
+	updatedAt := time.Now()
+
+	tx := Transaction{
+		id:                             id,
+		status:                         TxStatusProcessed,
+		externalTransactionID:          "ext-1",
+		providerID:                     "provider-a",
+		playerID:                       playerID,
+		walletID:                       walletID,
+		roundID:                        "round-1",
+		gameID:                         "game-1",
+		kind:                           KindBet,
+		amount:                         amount,
+		referenceExternalTransactionID: &referenceExternalTransactionID,
+		referenceTransactionID:         &referenceTransactionID,
+		failureCode:                    FailureCode("SOME_CODE"),
+		createdAt:                      createdAt,
+		updatedAt:                      updatedAt,
+	}
+
+	assert.Equal(t, id, tx.ID())
+	assert.Equal(t, TxStatusProcessed, tx.Status())
+	assert.Equal(t, "ext-1", tx.ExternalTransactionID())
+	assert.Equal(t, "provider-a", tx.ProviderID())
+	assert.Equal(t, playerID, tx.PlayerID())
+	assert.Equal(t, walletID, tx.WalletID())
+	assert.Equal(t, "round-1", tx.RoundID())
+	assert.Equal(t, "game-1", tx.GameID())
+	assert.Equal(t, KindBet, tx.Kind())
+	assert.Equal(t, amount, tx.Amount())
+	assert.Equal(t, &referenceExternalTransactionID, tx.ReferenceExternalTransactionID())
+	assert.Equal(t, &referenceTransactionID, tx.ReferenceTransactionID())
+	assert.Equal(t, FailureCode("SOME_CODE"), tx.FailureCode())
+	assert.Equal(t, createdAt, tx.CreatedAt())
+	assert.Equal(t, updatedAt, tx.UpdatedAt())
 }
 
 func TestTransactionIdempotencyKey(t *testing.T) {
