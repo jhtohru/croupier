@@ -27,7 +27,7 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
     croupier/  // main.go, wiring com Fx
   ```
   Interfaces de repositório (`WalletRepository`, `WagerRepository`, `OutboxRepository`, `TxManager`) ficam em `internal/app` — quem as consome de fato é o caso de uso, não o próprio agregado (correção feita na Fase 5: a nota original dizia `wallet.Repository` dentro de `internal/wallet`, mas isso só fazia sentido antes de existir a camada `internal/app`). Nunca em `internal/postgres` — mantém o domínio e o caso de uso livres de dependência de infraestrutura; só o pacote `postgres` (Fase 6) sabe que existe um banco.
-- [ ] `[~]` `.gitignore`, `Makefile` ou scripts auxiliares (opcional, conveniência)
+- [x] `[~]` `.gitignore` (`.env`) — sem `Makefile`/scripts auxiliares ainda, opcional
 - [x] `[!]` Iniciar `README.md` e `ARCHITECTURE.md` com esqueleto de seções — feito (ver [README.md](README.md) e [ARCHITECTURE.md](ARCHITECTURE.md))
 
 ## Fase 1 — internal/money
@@ -52,12 +52,12 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 ## Fase 3 — internal/wager (modelo) + WalletLedgerEntry
 - [x] `[!]` `WagerTransaction`: tipos OPENING/BET/WIN/LOSS/REFUND/ROLLBACK; estados PENDING → PROCESSED/REJECTED/FAILED (e PENDING_REFERENCE) — `Kind`/`TxStatus`, `IsTerminal()`, e os 4 métodos `Mark*` com transições corretas
 - [x] `[!]` Campos: ids interno/externo, providerId, idempotency key, hash do payload, walletId, playerId, roundId, gameId, amount, referências, failure code — `IdempotencyKey()` e `PayloadHash()` como métodos computados, não campos armazenados
-- [ ] `[!]` Regra: OPENING só é criada internamente — **correção**: isso não é responsabilidade de `NewTransaction` (senão seria impossível criar a OPENING legítima da abertura de wallet); é o caso de uso de submissão HTTP/SQS (Fase 5) que deve rejeitar `kind == KindOpening` antes de chamar `NewTransaction`. O que cabe aqui (regra de amount positivo pra OPENING) já está feito, junto com `KindWin`
-- [ ] `[!]` Regras por tipo: validação de sinal/referência por tipo já feita em `NewTransaction` (ver linha abaixo); a aplicação de fato (debitar/creditar a Wallet, checar saldo suficiente) é orquestração da Fase 5, não pertence a `Transaction`
+- [x] `[!]` Regra: OPENING só é criada internamente — `NewTransaction` rejeita `KindOpening` estruturalmente (cai no `default: ErrInvalidKind`), então `app.WagerSubmitter.Submit` já recusa automaticamente qualquer submissão externa com esse `Kind`, sem checagem extra necessária; `NewOpeningTransaction` é o único caminho válido, usado só por `WalletCreator.Create`
+- [x] `[!]` Regras por tipo: aplicação de fato (debitar/creditar a Wallet, checar saldo suficiente) implementada em `app.WagerSubmitter.process`, incluindo a direção condicional do `ROLLBACK`
 - [x] `[!]` Validação de sinal do amount é responsabilidade desta camada (WagerTransaction), não de Money: implementado via `IsPositive()`/`IsZero()` por `Kind` em `NewTransaction`
 - [x] `[!]` Resolução de referência: `(providerId, referenceExternalTransactionId)` deve bater provider/player/wallet/currency/round/amount (sem parciais) — `ValidateReference` implementado e revisado (inclui checagem de `status == PROCESSED`)
-- [ ] `[!]` Impedir reversão duplicada do mesmo tipo sobre a mesma referência (Fase 5 — precisa de query no repositório)
-- [ ] `[!]` Failure code distinto para reversão que excede saldo vs. BET com saldo insuficiente — tipo `FailureCode` criado, constantes específicas ficam pra Fase 5
+- [x] `[!]` Impedir reversão duplicada do mesmo tipo sobre a mesma referência — `WagerRepository.FindReversal` + checagem em `app.WagerSubmitter.process` (`FailureCodeDuplicateReversal`)
+- [x] `[!]` Failure code distinto para reversão que excede saldo vs. BET com saldo insuficiente — `FailureCodeInsufficientBalance` vs. `FailureCodeReversalExceedsBalance` em `internal/app/failure_codes.go`, testado separadamente
 - [x] `[!]` `WalletLedgerEntry` (em `internal/wallet`, já que pertence ao aggregate Wallet): `LedgerEntry`, imutável, `Direction` (DEBIT/CREDIT), valida `balanceAfter = balanceBefore ± amount` (a partir dos dois valores observados, não recalculado) — testado
 - [x] `[!]` Testes unitários: transições de estado, os 5 tipos externos + regras de zero por tipo, hash de payload (detecção de conflito), OPENING interno/eventos — `transaction_test.go` completo, `go test -race -count=1 ./...` passando
 - [x] `[doc]` ARCHITECTURE.md → "WagerTransaction, estados e tipos", "Ledger (WalletLedgerEntry)", "Reversões: REFUND e ROLLBACK"
@@ -120,8 +120,8 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 ## Fase 10 — cmd/croupier (Uber Fx) & Docker Compose & Env
 - [ ] `[!]` Módulos Fx (`fx.Module`, `fx.Provide`, `fx.Invoke`) para server, workers, recursos
 - [ ] `[!]` `fx.Lifecycle` com timeouts de start/shutdown observáveis
-- [ ] `[!]` `docker-compose.yml`: app, Postgres, LocalStack, Keycloak — reproduzível a partir de checkout limpo
-- [ ] `[!]` `.env.example` com valores locais (sem secrets)
+- [ ] `[!]` `docker-compose.yml`: app, Postgres, LocalStack, Keycloak — os três serviços de infra já estão no ar e verificados (subidos de verdade, healthcheck passando, testado que Postgres aceita conexão, SQS do LocalStack responde, Keycloak serve HTTP) — falta o serviço `app` (Dockerfile + `cmd/croupier`, Fase 10 adiante)
+- [x] `[!]` `.env.example` com valores locais (sem secrets) — cobre Postgres/LocalStack/Keycloak; vai crescer quando HTTP/SQS/auth de verdade existirem
 - [ ] `[!]` Dockerfile com versão do Go alinhada ao `go.mod`
 - [ ] `[doc]` README.md → "Pré-requisitos", "Variáveis de ambiente", "Subindo o ambiente local (Docker Compose)", "Rodando a aplicação"; ARCHITECTURE.md → "Composição (Uber Fx) e ciclo de vida", "Graceful shutdown"
 
