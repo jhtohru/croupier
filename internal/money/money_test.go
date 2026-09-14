@@ -170,6 +170,11 @@ func TestZero(t *testing.T) {
 	assert.Equal(t, Money{"BRL", 0}, m)
 }
 
+func TestCurrencyZero(t *testing.T) {
+	m := Currency("BRL").Zero()
+	assert.Equal(t, Money{"BRL", 0}, m)
+}
+
 func TestMoneyNegate(t *testing.T) {
 	t.Run("amount is too small", func(t *testing.T) {
 		m := Money{"BRL", math.MinInt64}
@@ -379,7 +384,7 @@ func TestLessThan(t *testing.T) {
 
 func TestMoneyCurrency(t *testing.T) {
 	m := Money{"BRL", 12345}
-	assert.Equal(t, "BRL", m.Currency())
+	assert.Equal(t, Currency("BRL"), m.Currency())
 }
 
 func TestMoneyAmount(t *testing.T) {

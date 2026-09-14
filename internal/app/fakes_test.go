@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jhtohru/croupier/internal/money"
 	"github.com/jhtohru/croupier/internal/outbox"
 	"github.com/jhtohru/croupier/internal/wager"
 	"github.com/jhtohru/croupier/internal/wallet"
@@ -23,8 +24,8 @@ func newFakeWalletRepository() *fakeWalletRepository {
 	}
 }
 
-func walletKey(playerID uuid.UUID, currency string) string {
-	return playerID.String() + ":" + currency
+func walletKey(playerID uuid.UUID, currency money.Currency) string {
+	return playerID.String() + ":" + string(currency)
 }
 
 func (r *fakeWalletRepository) FindByID(ctx context.Context, id uuid.UUID) (*wallet.Wallet, error) {
@@ -35,7 +36,7 @@ func (r *fakeWalletRepository) FindByID(ctx context.Context, id uuid.UUID) (*wal
 	return w, nil
 }
 
-func (r *fakeWalletRepository) FindByPlayerAndCurrency(ctx context.Context, playerID uuid.UUID, currency string) (*wallet.Wallet, error) {
+func (r *fakeWalletRepository) FindByPlayerAndCurrency(ctx context.Context, playerID uuid.UUID, currency money.Currency) (*wallet.Wallet, error) {
 	w, ok := r.byOwner[walletKey(playerID, currency)]
 	if !ok {
 		return nil, ErrWalletNotFound

@@ -67,10 +67,7 @@ func (wc *WalletCreator) Create(ctx context.Context, input CreateWalletInput) (*
 		return nil, err
 	}
 
-	zero, err := money.Zero(input.InitialBalance.Currency())
-	if err != nil {
-		return nil, err
-	}
+	zero := input.InitialBalance.Currency().Zero()
 
 	entry, err := wallet.NewLedgerEntry(wallet.NewLedgerEntryInput{
 		WalletID:      w.ID(),

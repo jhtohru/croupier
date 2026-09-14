@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jhtohru/croupier/internal/money"
 	"github.com/jhtohru/croupier/internal/outbox"
 	"github.com/jhtohru/croupier/internal/wager"
 	"github.com/jhtohru/croupier/internal/wallet"
@@ -24,7 +25,7 @@ type TxManager interface {
 
 type WalletRepository interface {
 	FindByID(ctx context.Context, id uuid.UUID) (*wallet.Wallet, error)
-	FindByPlayerAndCurrency(ctx context.Context, playerID uuid.UUID, currency string) (*wallet.Wallet, error)
+	FindByPlayerAndCurrency(ctx context.Context, playerID uuid.UUID, currency money.Currency) (*wallet.Wallet, error)
 	Save(ctx context.Context, w *wallet.Wallet) error
 	SaveLedgerEntry(ctx context.Context, e *wallet.LedgerEntry) error
 }

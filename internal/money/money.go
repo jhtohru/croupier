@@ -18,8 +18,21 @@ var (
 	ErrOverflow         = errors.New("integer overflow")
 )
 
+// Currency is a validated ISO 4217 currency code. The only way to obtain one
+// is through a Money value that has already passed validation (New,
+// FromMinorUnits, Zero, or UnmarshalJSON) — there is no exported constructor
+// that parses a bare string into a Currency on its own.
+type Currency string
+
+// Zero returns the zero Money value for this currency. Since c only exists
+// as the output of an already-validated Money, this cannot fail — unlike the
+// package-level Zero(string), which parses untrusted input.
+func (c Currency) Zero() Money {
+	return Money{currency: c, amount: 0}
+}
+
 type Money struct {
-	currency string
+	currency Currency
 	amount   int64
 }
 
@@ -31,18 +44,21 @@ func New(currency, amountStr string) (Money, error) {
 	if err != nil {
 		return Money{}, err
 	}
-	return Money{currency: currency, amount: amount}, nil
+	return Money{currency: Currency(currency), amount: amount}, nil
 }
 
 func FromMinorUnits(currency string, amount int64) (Money, error) {
 	if err := validateCurrency(currency); err != nil {
 		return Money{}, err
 	}
-	return Money{currency: currency, amount: amount}, nil
+	return Money{currency: Currency(currency), amount: amount}, nil
 }
 
 func Zero(curr string) (Money, error) {
-	return FromMinorUnits(curr, 0)
+	if err := validateCurrency(curr); err != nil {
+		return Money{}, err
+	}
+	return Currency(curr).Zero(), nil
 }
 
 func (m Money) Negate() (Money, error) {
@@ -87,7 +103,7 @@ func (m Money) LessThan(n Money) (bool, error) {
 	return m.amount < n.amount, nil
 }
 
-func (m Money) Currency() string {
+func (m Money) Currency() Currency {
 	return m.currency
 }
 
@@ -109,7 +125,7 @@ func (m Money) IsPositive() bool {
 
 func (m Money) MarshalJSON() ([]byte, error) {
 	return json.Marshal(moneyJSON{
-		Currency: m.currency,
+		Currency: string(m.currency),
 		Amount:   m.amountString(),
 	})
 }
@@ -126,7 +142,7 @@ func (m *Money) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	m.currency = raw.Currency
+	m.currency = Currency(raw.Currency)
 	m.amount = amount
 	return nil
 }
