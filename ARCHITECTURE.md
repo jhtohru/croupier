@@ -106,7 +106,12 @@ Ambas exigem referência obrigatória (`ErrMissingReference` se ausente) e rever
 - **Encontrada, mas inválida** (`ValidateReference` reprova — campos não batem ou tipo incompatível) → `MarkRejected(FailureCodeInvalidReference)`.
 - **Encontrada e válida** → `ResolveReference`, depois checagem de reversão duplicada (`WagerRepository.FindReversal`, busca uma `REFUND`/`ROLLBACK` `PROCESSED` já apontando pra essa mesma referência) — se já existe, `MarkRejected(FailureCodeDuplicateReversal)`.
 
-**O que falta**: o worker que revisita transações em `PENDING_REFERENCE` depois (retry com backoff exponencial até TTL/max attempts, então `REJECTED`) ainda não existe — hoje uma transação parada nesse estado só sai dele se alguém submeter a referência que faltava, disparando um novo processamento de novo; não há resolução automática em background.
+**Worker de retry (`app.PendingReferenceResolver`)**: revisita periodicamente transações em `PENDING_REFERENCE` — não depende só de alguém submeter a referência que faltava. `ResolveDue` busca (via `WagerRepository.FindDuePendingReferences`) as transações cujo agendamento de retry já venceu e, pra cada uma, **reentra em `WagerSubmitter.process`** — resolver uma referência pendente é exatamente a mesma decisão de uma submissão nova, só que partindo de `PENDING_REFERENCE` em vez de `PENDING` (por isso `Transaction.MarkPendingReference()` é idempotente a partir de `PENDING_REFERENCE`: o worker chama esse caminho de novo a cada tentativa sem sucesso).
+
+- **Ainda não encontrada**: `process` re-marca `PENDING_REFERENCE` (idempotente), mas `parkPendingReference` só reemite o evento/regrava a linha na *primeira* vez que a transação entra nesse estado — uma tentativa que não muda nada não tem o que anunciar de novo, e reemitir o mesmo evento a cada ciclo de retry só faria spam no outbox. O agendamento do próximo retry (`attempts`/`next_retry_at`, colunas `pending_reference_attempts`/`pending_reference_next_retry_at` da migration `000007`) é responsabilidade só do `PendingReferenceResolver`, não do domínio — não é invariante de `wager.Transaction`, é metadado operacional do worker.
+- **Backoff exponencial**: `base * 2^attempts`, `attempts` contado à parte do agregado (não persistido em `wager.Transaction`).
+- **Desistência**: `attempts >= maxAttempts` OU `now - CreatedAt() >= ttl` (o que vier primeiro) → `MarkRejected(FailureCodeReferenceNotFound)`, via o mesmo `WagerSubmitter.reject` usado pelos outros caminhos de rejeição.
+- `maxAttempts`/`ttl`/`backoffBase` são parâmetros do construtor, não constantes fixas — os valores reais de produção e a cadência de chamada de `ResolveDue` (timer/ticker) ficam pra Fase 10 (`cmd/croupier`/Fx), que ainda não existe.
 
 ## Estratégia de concorrência
 
@@ -150,6 +155,8 @@ Migrations em `internal/postgres/migrations`, uma tabela por migration, geridas 
 **Decisão de schema pra `OPENING`**: `provider_id`/`external_transaction_id`/`round_id`/`game_id` são `NULL`-áveis (não `NOT NULL`), porque `OPENING` genuinamente não tem esses campos (ver `wager.NewOpeningTransaction`). Isso importa pra `UNIQUE (provider_id, external_transaction_id)`: em SQL padrão, cada `NULL` é tratado como distinto de qualquer outro valor, incluindo outro `NULL` — então múltiplas linhas `OPENING` com esses campos nulos coexistem sem colidir na constraint de unicidade. Verificado com duas inserções `OPENING` de teste antes de aceitar essa decisão como correta.
 
 **O que foi verificado de verdade, não só lido no SQL**: subi um Postgres real via `docker-compose.yml`, apliquei as migrations (`up`), testei cada constraint acima com inserções que deveriam falhar e inserções que deveriam passar, reverti tudo (`down -all`) e reapliquei (`up`) pra confirmar que o ciclo completo funciona antes de considerar essa fase pronta.
+
+**Migrations `000006`/`000007`, adicionadas depois, na revisão**: `000006` adiciona um índice em `wallet_ledger_entries.transaction_id` (o único índice existente ali é liderado por `wallet_id`, então não serve pra `FindLedgerEntryByTransactionID`, que filtra só por `transaction_id` — usado em todo replay idempotente). `000007` adiciona `pending_reference_attempts`/`pending_reference_next_retry_at` em `wager_transactions`, metadado operacional do `PendingReferenceResolver` (ver "Referências pendentes"), não invariante de domínio. Migrations já aplicadas nunca são editadas — regra seguida à risca aqui: mesmo sendo mudanças pequenas na mesma tabela de uma migration anterior, cada uma virou um arquivo novo.
 
 ## Mensageria (SQS)
 

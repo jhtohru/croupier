@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -185,4 +186,78 @@ func TestWagerSubmitterConcurrentBets(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, entries, 1)
 	assert.Equal(t, wallet.DirectionDebit, entries[0].Direction())
+}
+
+// TestPendingReferenceResolverRealPostgres exercises the whole
+// PENDING_REFERENCE retry path against real Postgres: a REFUND submitted
+// before its BET exists parks, a first ResolveDue leaves it parked and
+// schedules a future retry (so it must NOT be picked up again immediately),
+// and once the BET arrives a due ResolveDue resolves it and moves the wallet.
+func TestPendingReferenceResolverRealPostgres(t *testing.T) {
+	pool := testPool(t)
+	walletRepo := postgres.NewWalletRepository(pool)
+	wagerRepo := postgres.NewWagerRepository(pool)
+	outboxRepo := postgres.NewOutboxRepository(pool)
+	txManager := postgres.NewTxManager(pool)
+
+	balance, err := money.FromMinorUnits("BRL", 10000)
+	require.NoError(t, err)
+	w, err := wallet.New(uuid.New(), balance)
+	require.NoError(t, err)
+	require.NoError(t, walletRepo.Save(context.Background(), w))
+
+	submitter := app.NewWagerSubmitter(walletRepo, wagerRepo, outboxRepo, txManager)
+	resolver := app.NewPendingReferenceResolver(wagerRepo, submitter, 5, time.Hour, time.Minute)
+
+	missingRefID := "bet-1"
+	refundResult, err := submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
+		ProviderID: "provider-a", ExternalTransactionID: "refund-1",
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindRefund, Amount: mustMoney(t, 3000), ReferenceExternalTransactionID: &missingRefID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, wager.TxStatusPendingReference, refundResult.Transaction.Status())
+
+	// Not due yet: nothing scheduled means "due now" on first sight, so a
+	// resolve attempt right away DOES pick it up — but since the reference
+	// still doesn't exist, it must stay parked and get a future retry time
+	// instead of an immediate one.
+	n, err := resolver.ResolveDue(context.Background(), time.Now(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	stillParked, err := wagerRepo.FindByID(context.Background(), refundResult.Transaction.ID())
+	require.NoError(t, err)
+	assert.Equal(t, wager.TxStatusPendingReference, stillParked.Status())
+
+	// Immediately due again would find nothing — the retry was scheduled a
+	// minute out.
+	n, err = resolver.ResolveDue(context.Background(), time.Now(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+
+	_, err = submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
+		ProviderID: "provider-a", ExternalTransactionID: missingRefID,
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindBet, Amount: mustMoney(t, 3000),
+	})
+	require.NoError(t, err)
+
+	n, err = resolver.ResolveDue(context.Background(), time.Now().Add(2*time.Minute), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	resolved, err := wagerRepo.FindByID(context.Background(), refundResult.Transaction.ID())
+	require.NoError(t, err)
+	assert.Equal(t, wager.TxStatusProcessed, resolved.Status())
+
+	finalWallet, err := walletRepo.FindByID(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.Equal(t, balance, finalWallet.Balance()) // BET debited 3000, REFUND credited it back
+}
+
+func mustMoney(t *testing.T, minorUnits int64) money.Money {
+	t.Helper()
+	m, err := money.FromMinorUnits("BRL", minorUnits)
+	require.NoError(t, err)
+	return m
 }

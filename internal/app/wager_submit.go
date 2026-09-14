@@ -265,9 +265,26 @@ func movementDirection(kind wager.Kind, referenced *wager.Transaction) (wallet.D
 	return "", fmt.Errorf("app: no wallet movement defined for kind %q", kind)
 }
 
+// parkPendingReference is called both the first time a reference can't be
+// found and, by PendingReferenceResolver, on every subsequent retry that
+// still can't find it — MarkPendingReference is idempotent from
+// PENDING_REFERENCE for exactly this reason. Only the first call emits the
+// PENDING_REFERENCE event and writes the row: a retry that changes nothing
+// about tx's persisted state has nothing new to save or announce, and
+// re-emitting the same event every retry cycle would spam the outbox without
+// telling any consumer anything it doesn't already know. Retry bookkeeping
+// (attempt count, next retry time) is the resolver's job, not this method's.
 func (ws *WagerSubmitter) parkPendingReference(ctx context.Context, tx *wager.Transaction) (*SubmitWagerTransactionResult, error) {
+	alreadyParked := tx.Status() == wager.TxStatusPendingReference
 	if err := tx.MarkPendingReference(); err != nil {
 		return nil, err
+	}
+	if alreadyParked {
+		w, err := ws.wallets.FindByID(ctx, tx.WalletID())
+		if err != nil {
+			return nil, err
+		}
+		return &SubmitWagerTransactionResult{Transaction: tx, Balance: w.Balance()}, nil
 	}
 	event, err := newWagerTransactionPendingReferenceEvent(tx)
 	if err != nil {

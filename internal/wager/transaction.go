@@ -314,11 +314,15 @@ func (tx *Transaction) MarkRejected(failureCode FailureCode) error {
 	return nil
 }
 
+// MarkPendingReference parks tx waiting for its reference to appear. Callable
+// from PENDING (first time) or, idempotently, from PENDING_REFERENCE itself —
+// the retry worker calls this again on every attempt that still can't find
+// the reference, and re-affirming the same state must not be an error.
 func (tx *Transaction) MarkPendingReference() error {
 	if tx.status.IsTerminal() {
 		return ErrTerminalTransaction
 	}
-	if tx.status != TxStatusPending {
+	if tx.status != TxStatusPending && tx.status != TxStatusPendingReference {
 		return ErrInvalidTransition
 	}
 	tx.status = TxStatusPendingReference

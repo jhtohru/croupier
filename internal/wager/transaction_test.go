@@ -797,10 +797,10 @@ func TestTransactionMarkPendingReference(t *testing.T) {
 		assert.Equal(t, TxStatusPendingReference, tx.status)
 	})
 
-	t.Run("from pending reference", func(t *testing.T) {
+	t.Run("from pending reference is idempotent", func(t *testing.T) {
 		tx := &Transaction{status: TxStatusPendingReference}
 		err := tx.MarkPendingReference()
-		assert.ErrorIs(t, err, ErrInvalidTransition)
+		assert.NoError(t, err)
 		assert.Equal(t, TxStatusPendingReference, tx.status)
 	})
 

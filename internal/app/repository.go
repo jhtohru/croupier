@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -50,6 +51,14 @@ type WagerRepository interface {
 	// or ROLLBACK) already pointing at referencedTransactionID, used to
 	// prevent applying the same kind of reversal twice against one reference.
 	FindReversal(ctx context.Context, referencedTransactionID uuid.UUID, kind wager.Kind) (*wager.Transaction, error)
+	// FindDuePendingReferences returns up to limit PENDING_REFERENCE
+	// transactions whose retry schedule is due at or before now — a
+	// transaction never scheduled yet counts as immediately due. Used by
+	// PendingReferenceResolver.
+	FindDuePendingReferences(ctx context.Context, now time.Time, limit int) ([]PendingReferenceRetry, error)
+	// ScheduleNextPendingReferenceRetry records another failed resolution
+	// attempt for id and when to try again.
+	ScheduleNextPendingReferenceRetry(ctx context.Context, id uuid.UUID, nextRetryAt time.Time) error
 }
 
 type OutboxRepository interface {

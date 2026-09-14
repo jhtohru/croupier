@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -103,6 +104,8 @@ func (r *fakeWalletRepository) ListLedgerEntries(ctx context.Context, walletID u
 
 type fakeWagerRepository struct {
 	transactions []*wager.Transaction
+	attempts     map[uuid.UUID]int
+	nextRetryAt  map[uuid.UUID]time.Time
 }
 
 func (r *fakeWagerRepository) Save(ctx context.Context, tx *wager.Transaction) error {
@@ -138,6 +141,35 @@ func (r *fakeWagerRepository) FindReversal(ctx context.Context, referencedTransa
 		}
 	}
 	return nil, ErrWagerTransactionNotFound
+}
+
+func (r *fakeWagerRepository) FindDuePendingReferences(ctx context.Context, now time.Time, limit int) ([]PendingReferenceRetry, error) {
+	var due []PendingReferenceRetry
+	for _, tx := range r.transactions {
+		if tx.Status() != wager.TxStatusPendingReference {
+			continue
+		}
+		if next, scheduled := r.nextRetryAt[tx.ID()]; scheduled && next.After(now) {
+			continue
+		}
+		due = append(due, PendingReferenceRetry{Transaction: tx, Attempts: r.attempts[tx.ID()]})
+		if limit > 0 && len(due) >= limit {
+			break
+		}
+	}
+	return due, nil
+}
+
+func (r *fakeWagerRepository) ScheduleNextPendingReferenceRetry(ctx context.Context, id uuid.UUID, nextRetryAt time.Time) error {
+	if r.attempts == nil {
+		r.attempts = make(map[uuid.UUID]int)
+	}
+	if r.nextRetryAt == nil {
+		r.nextRetryAt = make(map[uuid.UUID]time.Time)
+	}
+	r.attempts[id]++
+	r.nextRetryAt[id] = nextRetryAt
+	return nil
 }
 
 type fakeOutboxRepository struct {

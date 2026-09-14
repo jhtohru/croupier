@@ -11,8 +11,7 @@ const (
 	FailureCodeReversalExceedsBalance wager.FailureCode = "REVERSAL_EXCEEDS_BALANCE"
 	FailureCodeInvalidReference       wager.FailureCode = "INVALID_REFERENCE"
 	FailureCodeDuplicateReversal      wager.FailureCode = "DUPLICATE_REVERSAL"
-	// FailureCodeReferenceNotFound is assigned by the PENDING_REFERENCE retry
-	// worker (not yet implemented) once a reference never resolves within its
-	// TTL/max attempts.
+	// FailureCodeReferenceNotFound is assigned by PendingReferenceResolver once
+	// a reference never resolves within its TTL/max attempts.
 	FailureCodeReferenceNotFound wager.FailureCode = "REFERENCE_NOT_FOUND"
 )
