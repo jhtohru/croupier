@@ -69,7 +69,15 @@ Mantê-los separados (em vez de reaproveitar um erro genérico) é necessário p
 
 ## Ledger (WalletLedgerEntry)
 
-_(Fase 3 — ainda não implementado; entra em `internal/wallet`)_
+`LedgerEntry` (`internal/wallet`) é totalmente imutável: nenhum método muta o struct depois de construído — "append-only, sem edição/remoção" se garante estruturalmente (não existe API pra isso), não por convenção. Só tem `createdAt`, sem `updatedAt` — diferente de `Wallet`/`Transaction`, nunca é atualizado.
+
+`Direction` (`DEBIT`/`CREDIT`) é tipo string, mesmo idiom de `Kind`/`TxStatus`/`FailureCode`.
+
+**`NewLedgerEntry` valida `balanceAfter`, não calcula.** Decisão deliberada: o caso de uso (Fase 5) vai ter tanto `balanceBefore` quanto `balanceAfter` em mãos, os dois observados diretamente da `Wallet` real (`before := wallet.Balance()`, chama `Credit`/`Debit`, `after := wallet.Balance()`) — que é a fonte de verdade da aritmética de saldo. Se o construtor só recebesse `balanceBefore` e recalculasse `balanceAfter` internamente, um bug no caso de uso (capturar o snapshot da wallet errada, ou na ordem errada) passaria batido — o `LedgerEntry` produziria um resultado "consistente" internamente, mas errado em relação ao que a `Wallet` de fato fez. Receber os dois valores e validar `balanceAfter == balanceBefore ± amount` (via `Money.Add`/`Subtract`/`Equal`, reaproveitados, sem aritmética nova) é uma checagem real sobre a contabilidade do chamador, não só uma repetição da fórmula.
+
+**Defesa em profundidade replicada**: `amount` estritamente positivo e `balanceBefore`/`balanceAfter` não-negativos são checados aqui de novo, mesmo já validados em `Wallet.Credit`/`Debit` — mesmo princípio de não confiar cegamente no chamador que já aplicamos lá.
+
+**Unicidade `(walletId, transactionId)` não é responsabilidade deste tipo** — uma única construção em memória não tem visibilidade de outras entries já persistidas; fica pra constraint de schema na Fase 6 (`UNIQUE(wallet_id, transaction_id)`).
 
 ## Reversões: REFUND e ROLLBACK
 

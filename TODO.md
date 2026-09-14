@@ -58,9 +58,9 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[!]` Resolução de referência: `(providerId, referenceExternalTransactionId)` deve bater provider/player/wallet/currency/round/amount (sem parciais) — `ValidateReference` implementado e revisado (inclui checagem de `status == PROCESSED`)
 - [ ] `[!]` Impedir reversão duplicada do mesmo tipo sobre a mesma referência (Fase 5 — precisa de query no repositório)
 - [ ] `[!]` Failure code distinto para reversão que excede saldo vs. BET com saldo insuficiente — tipo `FailureCode` criado, constantes específicas ficam pra Fase 5
-- [ ] `[!]` `WalletLedgerEntry` (em `internal/wallet`, já que pertence ao aggregate Wallet): ainda não iniciado
+- [x] `[!]` `WalletLedgerEntry` (em `internal/wallet`, já que pertence ao aggregate Wallet): `LedgerEntry`, imutável, `Direction` (DEBIT/CREDIT), valida `balanceAfter = balanceBefore ± amount` (a partir dos dois valores observados, não recalculado) — testado
 - [x] `[!]` Testes unitários: transições de estado, os 5 tipos externos + regras de zero por tipo, hash de payload (detecção de conflito), OPENING interno/eventos — `transaction_test.go` completo, `go test -race -count=1 ./...` passando
-- [ ] `[doc]` ARCHITECTURE.md → "WagerTransaction, estados e tipos" ✓, "Reversões: REFUND e ROLLBACK" ✓ — falta só "Ledger (WalletLedgerEntry)", que depende do item abaixo ser implementado primeiro
+- [x] `[doc]` ARCHITECTURE.md → "WagerTransaction, estados e tipos", "Ledger (WalletLedgerEntry)", "Reversões: REFUND e ROLLBACK"
 
 ## Fase 4 — internal/inbox, internal/outbox (modelos)
 - [ ] `[!]` `Inbox`: `(consumerName, messageId)` único, hash, receipt, flag de conclusão
