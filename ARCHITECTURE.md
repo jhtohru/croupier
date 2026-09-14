@@ -128,7 +128,18 @@ Nenhum dos dois modela coordenação entre múltiplas instâncias de worker (lea
 
 ## Persistência (PostgreSQL)
 
-_(Fase 6)_
+Migrations em `internal/postgres/migrations`, uma tabela por migration, geridas por `golang-migrate` (pares `.up.sql`/`.down.sql`). Cinco tabelas: `wallets`, `wallet_ledger_entries`, `wager_transactions`, `inbox`, `outbox` — mapeiam 1:1 pros tipos de domínio já implementados.
+
+**Constraints replicam os invariantes de domínio, não os substituem.** Mesmo raciocínio usado em todo o projeto (ex.: a decisão de `Wallet.FromPersistence` não revalidar, condicionada a essas constraints existirem): o domínio protege o invariante em memória, antes de qualquer escrita; o schema é o backstop contra escrita concorrente, bug, ou acesso direto ao banco.
+
+- `CHECK (balance >= 0)`, `CHECK (version >= 1)` em `wallets`.
+- `CHECK` de consistência em `wallet_ledger_entries`: `balance_after = balance_before ± amount` conforme `direction` — mesma fórmula que `wallet.NewLedgerEntry` já valida em Go, replicada no schema.
+- **Imutabilidade do ledger não é só convenção da aplicação**: um trigger `BEFORE UPDATE OR DELETE` em `wallet_ledger_entries` levanta exceção pra qualquer tentativa de alterar ou apagar uma entrada já escrita. Testado de verdade (não só lido): `UPDATE`/`DELETE` são rejeitados pelo Postgres, não só evitados pelo código Go.
+- `CHECK` em `wager_transactions` exigindo `provider_id`/`external_transaction_id`/`round_id`/`game_id` presentes pra todo `kind` exceto `OPENING` — replica a validação de `NewTransaction` (`ErrInvalidInput`).
+
+**Decisão de schema pra `OPENING`**: `provider_id`/`external_transaction_id`/`round_id`/`game_id` são `NULL`-áveis (não `NOT NULL`), porque `OPENING` genuinamente não tem esses campos (ver `wager.NewOpeningTransaction`). Isso importa pra `UNIQUE (provider_id, external_transaction_id)`: em SQL padrão, cada `NULL` é tratado como distinto de qualquer outro valor, incluindo outro `NULL` — então múltiplas linhas `OPENING` com esses campos nulos coexistem sem colidir na constraint de unicidade. Verificado com duas inserções `OPENING` de teste antes de aceitar essa decisão como correta.
+
+**O que foi verificado de verdade, não só lido no SQL**: subi um Postgres real via `docker-compose.yml`, apliquei as migrations (`up`), testei cada constraint acima com inserções que deveriam falhar e inserções que deveriam passar, reverti tudo (`down -all`) e reapliquei (`up`) pra confirmar que o ciclo completo funciona antes de considerar essa fase pronta.
 
 ## Mensageria (SQS)
 

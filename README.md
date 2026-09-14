@@ -18,7 +18,41 @@ _(a preencher na Fase 10)_
 
 ## Migrations
 
-_(a preencher na Fase 6 — comandos de apply/rollback)_
+Migrations ficam em `internal/postgres/migrations` (pares `.up.sql`/`.down.sql`, formato [golang-migrate](https://github.com/golang-migrate/migrate)). Não precisa instalar nada localmente — os comandos abaixo rodam a própria imagem oficial do `migrate` conectada à rede do `docker-compose.yml`.
+
+Suba o Postgres primeiro:
+```sh
+docker compose up -d postgres
+```
+
+Aplicar todas as migrations pendentes:
+```sh
+docker run --rm --network croupier_default \
+  -v "$(pwd)/internal/postgres/migrations:/migrations" \
+  migrate/migrate:v4.17.1 \
+  -path=/migrations -database "postgres://croupier:croupier@postgres:5432/croupier?sslmode=disable" \
+  up
+```
+
+Reverter tudo:
+```sh
+docker run --rm --network croupier_default \
+  -v "$(pwd)/internal/postgres/migrations:/migrations" \
+  migrate/migrate:v4.17.1 \
+  -path=/migrations -database "postgres://croupier:croupier@postgres:5432/croupier?sslmode=disable" \
+  down -all
+```
+
+Reverter só a última:
+```sh
+docker run --rm --network croupier_default \
+  -v "$(pwd)/internal/postgres/migrations:/migrations" \
+  migrate/migrate:v4.17.1 \
+  -path=/migrations -database "postgres://croupier:croupier@postgres:5432/croupier?sslmode=disable" \
+  down 1
+```
+
+Ajuste usuário/senha/porta se você alterou os valores padrão do `.env.example`.
 
 ## Inicialização das filas (SQS / LocalStack)
 

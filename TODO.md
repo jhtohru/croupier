@@ -82,12 +82,12 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [ ] `[doc]` ARCHITECTURE.md → "Idempotência", "Referências pendentes (PENDING_REFERENCE)", "Estratégia de concorrência"
 
 ## Fase 6 — internal/postgres
-- [ ] `[!]` Migrations versionadas (apply/rollback documentados) — schema com uniqueness, non-negativity (constraint de saldo), imutabilidade do ledger
+- [x] `[!]` Migrations versionadas em `internal/postgres/migrations` (`golang-migrate`, pares `.up.sql`/`.down.sql`) — `wallets`, `wallet_ledger_entries`, `wager_transactions`, `inbox`, `outbox`. Testado de verdade contra Postgres real: `up` aplica limpo, `down -all` reverte limpo, `up` de novo funciona. Constraints verificadas funcionalmente (não só existência): `UNIQUE(player_id, currency)`, `CHECK(balance >= 0)`, `CHECK(version >= 1)`, duas `OPENING` com `provider_id`/`external_transaction_id` `NULL` coexistem (`UNIQUE` trata `NULL` como distinto), `BET` sem `provider_id` é rejeitado, `LedgerEntry` com `balance_after` inconsistente é rejeitado, `UPDATE`/`DELETE` em `wallet_ledger_entries` são bloqueados por trigger (imutabilidade real, não só por convenção da aplicação) — comandos de apply/rollback ainda faltam no README (linha abaixo, Fase 6 `[doc]`)
 - [ ] `[!]` **Dependência da decisão de `wallet.FromPersistence`/`ReHydrate` não revalidar dados vindos do banco**: a tabela `wallets` precisa de `CHECK (balance >= 0)`, `CHECK (version >= 1)` e `NOT NULL` em `id`/`player_id`/`created_at`/`updated_at` — sem essas constraints, não sobra nenhuma garantia desses invariantes em lugar nenhum (nem no domínio, nem no banco)
 - [ ] `[!]` Implementação de `wallet.Repository`, `wager.Repository`, repositórios de inbox/outbox com `pgx` e SQL explícito (transações, locks, constraints verificáveis)
 - [ ] `[!]` Outbox transacional: estado da transação + saldo + ledger + inbox + evento confirmados na mesma transação SQL
 - [ ] `[!]` Testes de integração com Postgres real (Docker) — sem mocks completos
-- [ ] `[doc]` README.md → "Migrations" (comandos de apply/rollback); ARCHITECTURE.md → "Persistência (PostgreSQL)"
+- [x] `[doc]` README.md → "Migrations" (comandos de apply/rollback); ARCHITECTURE.md → "Persistência (PostgreSQL)"
 
 ## Fase 7 — internal/httpapi
 - [ ] `[!]` `POST /wallets`, `GET /wallets/:walletId`, `GET /wallets/:walletId/ledger?cursor=&limit=`, `POST /wallets/:walletId/reconciliation`

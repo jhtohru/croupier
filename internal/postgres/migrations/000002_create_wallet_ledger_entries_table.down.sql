@@ -1,0 +1,3 @@
+DROP TRIGGER wallet_ledger_entries_immutable ON wallet_ledger_entries;
+DROP FUNCTION wallet_ledger_entries_prevent_mutation();
+DROP TABLE wallet_ledger_entries;
