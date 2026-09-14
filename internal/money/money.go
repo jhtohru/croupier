@@ -99,6 +99,10 @@ func (m Money) IsNegative() bool {
 	return m.amount < 0
 }
 
+func (m Money) IsZero() bool {
+	return m.amount == 0
+}
+
 func (m Money) IsPositive() bool {
 	return m.amount > 0
 }

@@ -50,17 +50,17 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[doc]` ARCHITECTURE.md → "Wallet e invariantes de saldo"
 
 ## Fase 3 — internal/wager (modelo) + WalletLedgerEntry
-- [ ] `[!]` `WagerTransaction`: tipos OPENING/BET/WIN/LOSS/REFUND/ROLLBACK; estados PENDING → PROCESSED/REJECTED/FAILED (e PENDING_REFERENCE)
-- [ ] `[!]` Campos: ids interno/externo, providerId, idempotency key, hash do payload, walletId, playerId, roundId, gameId, amount, referências, failure code
-- [ ] `[!]` Regra: OPENING só é criada internamente (rejeitar se vier de HTTP/SQS)
-- [ ] `[!]` Regras por tipo: BET debita (saldo suficiente), WIN credita (referência opcional ao BET da rodada), LOSS não gera ledger nem muda versão (amount deve ser "0.00"), REFUND reverte BET processado (requer referência), ROLLBACK inverte a operação original (requer referência)
-- [ ] `[!]` Validação de sinal do amount é responsabilidade desta camada (WagerTransaction), não de Money: BET/WIN/REFUND/ROLLBACK exigem `!amount.IsNegative()`; LOSS exige `amount.Equal(money.Zero(currency))`
-- [ ] `[!]` Resolução de referência: `(providerId, referenceExternalTransactionId)` deve bater provider/player/wallet/currency/round/amount (sem parciais)
-- [ ] `[!]` Impedir reversão duplicada do mesmo tipo sobre a mesma referência
-- [ ] `[!]` Failure code distinto para reversão que excede saldo vs. BET com saldo insuficiente
-- [ ] `[!]` `WalletLedgerEntry` (em `internal/wallet`, já que pertence ao aggregate Wallet): imutável, direction (DEBIT/CREDIT), amount, balanceBefore/After, validação `balanceAfter = balanceBefore ± money`, unicidade `(walletId, transactionId)`
-- [ ] `[!]` Testes unitários: transições de estado, os 5 tipos externos + regras de zero por tipo, hash de payload (detecção de conflito), OPENING interno/eventos
-- [ ] `[doc]` ARCHITECTURE.md → "WagerTransaction, estados e tipos", "Ledger (WalletLedgerEntry)", "Reversões: REFUND e ROLLBACK" (documentar interação entre os dois)
+- [x] `[!]` `WagerTransaction`: tipos OPENING/BET/WIN/LOSS/REFUND/ROLLBACK; estados PENDING → PROCESSED/REJECTED/FAILED (e PENDING_REFERENCE) — `Kind`/`TxStatus`, `IsTerminal()`, e os 4 métodos `Mark*` com transições corretas
+- [x] `[!]` Campos: ids interno/externo, providerId, idempotency key, hash do payload, walletId, playerId, roundId, gameId, amount, referências, failure code — `IdempotencyKey()` e `PayloadHash()` como métodos computados, não campos armazenados
+- [ ] `[!]` Regra: OPENING só é criada internamente — **correção**: isso não é responsabilidade de `NewTransaction` (senão seria impossível criar a OPENING legítima da abertura de wallet); é o caso de uso de submissão HTTP/SQS (Fase 5) que deve rejeitar `kind == KindOpening` antes de chamar `NewTransaction`. O que cabe aqui (regra de amount positivo pra OPENING) já está feito, junto com `KindWin`
+- [ ] `[!]` Regras por tipo: validação de sinal/referência por tipo já feita em `NewTransaction` (ver linha abaixo); a aplicação de fato (debitar/creditar a Wallet, checar saldo suficiente) é orquestração da Fase 5, não pertence a `Transaction`
+- [x] `[!]` Validação de sinal do amount é responsabilidade desta camada (WagerTransaction), não de Money: implementado via `IsPositive()`/`IsZero()` por `Kind` em `NewTransaction`
+- [x] `[!]` Resolução de referência: `(providerId, referenceExternalTransactionId)` deve bater provider/player/wallet/currency/round/amount (sem parciais) — `ValidateReference` implementado e revisado (inclui checagem de `status == PROCESSED`)
+- [ ] `[!]` Impedir reversão duplicada do mesmo tipo sobre a mesma referência (Fase 5 — precisa de query no repositório)
+- [ ] `[!]` Failure code distinto para reversão que excede saldo vs. BET com saldo insuficiente — tipo `FailureCode` criado, constantes específicas ficam pra Fase 5
+- [ ] `[!]` `WalletLedgerEntry` (em `internal/wallet`, já que pertence ao aggregate Wallet): ainda não iniciado
+- [x] `[!]` Testes unitários: transições de estado, os 5 tipos externos + regras de zero por tipo, hash de payload (detecção de conflito), OPENING interno/eventos — `transaction_test.go` completo, `go test -race -count=1 ./...` passando
+- [ ] `[doc]` ARCHITECTURE.md → "WagerTransaction, estados e tipos" ✓, "Reversões: REFUND e ROLLBACK" ✓ — falta só "Ledger (WalletLedgerEntry)", que depende do item abaixo ser implementado primeiro
 
 ## Fase 4 — internal/inbox, internal/outbox (modelos)
 - [ ] `[!]` `Inbox`: `(consumerName, messageId)` único, hash, receipt, flag de conclusão

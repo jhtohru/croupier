@@ -53,15 +53,33 @@ Mantê-los separados (em vez de reaproveitar um erro genérico) é necessário p
 
 ## WagerTransaction, estados e tipos
 
-_(Fase 3)_
+`Transaction` (`internal/wager`) modela a operação externa. `Kind` (`OPENING`/`BET`/`WIN`/`LOSS`/`REFUND`/`ROLLBACK`) e `TxStatus` (`PENDING`/`PENDING_REFERENCE`/`PROCESSED`/`REJECTED`/`FAILED`) são tipos string — mesmo idiom de `net/http.MethodGet`, evita tabela de mapeamento int↔string pra (de)serializar contra o wire format.
+
+**Máquina de estados**: `PENDING` é sempre o estado inicial. `PENDING_REFERENCE` só é alcançável a partir de `PENDING`, e não é reentrante (`MarkPendingReference()` chamado de `PENDING_REFERENCE` retorna `ErrInvalidTransition`) — uma transação que já está esperando referência não "reprocessa do zero", ela resolve direto pra um estado terminal quando a referência aparece ou o TTL estoura. Os quatro métodos `Mark*` (`MarkProcessed`, `MarkRejected`, `MarkPendingReference`, `MarkFailed`) protegem essas transições dentro do próprio agregado — mesmo princípio usado em `Wallet.Credit`/`Debit`: o tipo garante que um estado inválido é estruturalmente impossível de alcançar, em vez de depender do caso de uso lembrar de checar antes de mutar.
+
+**Construção via `NewTransactionInput`** (struct de entrada, não parâmetros posicionais) — `NewTransaction` valida em duas camadas: (1) campos estruturais obrigatórios (`providerId`, `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId` não podem ser vazios/nulos) e (2) regras específicas por `Kind` via `switch`: `BET`/`WIN`/`REFUND`/`ROLLBACK`/`OPENING` exigem amount positivo, `LOSS` exige amount exatamente zero, `BET` nunca aceita referência, `REFUND`/`ROLLBACK` sempre exigem referência.
+
+**Validação de sinal do amount mora aqui, não em `Money`** — decisão deliberada: `Money` é um value object simétrico e livre de contexto de negócio (aceita negativo, usado também em diffs de reconciliação); "este valor não pode ser negativo" é uma regra específica de `WagerTransaction`, então vive na camada que sabe o porquê.
+
+**`OPENING` não é rejeitada aqui** — correção importante de uma decisão inicial errada: `NewTransaction` **precisa** conseguir construir uma transação `OPENING` (é como a abertura de wallet com saldo inicial cria seu registro), então rejeitar `KindOpening` dentro do construtor tornaria essa feature impossível. A regra "rejeitar OPENING vinda de HTTP/SQS" pertence ao caso de uso de submissão externa (Fase 5), que deve recusar `kind == KindOpening` **antes** de chamar `NewTransaction` — o construtor de domínio fica genérico e utilizável por qualquer chamador legítimo, interno ou não.
+
+**`IdempotencyKey()` e `PayloadHash()` são métodos computados, não campos armazenados** — os dois são 100% deriváveis de campos que já existem na struct (`providerID`+`externalTransactionID` pra chave; os campos de negócio pro hash), então guardá-los separadamente só criaria risco de dessincronia. `PayloadHash()` serializa uma struct fixa (ordem de campos determinística, sem precisar de lib de canonicalização) com os campos de negócio, **excluindo** `providerID`/`externalTransactionID` (eles são a própria chave de idempotência, não conteúdo a comparar) e usa SHA-256; retorna `[32]byte`, comparável direto com `==`.
+
+**Duas referências, mesma forma**: `referenceExternalTransactionID *string` (o que o provider mandou) e `referenceTransactionID *uuid.UUID` (o ID interno resolvido, via `ResolveReference`) — ambos ponteiro, deliberadamente, porque representam o mesmo conceito de opcionalidade em dois momentos do ciclo de vida; tratar um como ponteiro e o outro com sentinela de valor zero criaria uma assimetria pior do que a repetição de padrão. `ResolveReference` é idempotente (mesmo id de novo não é erro) mas rejeita um id diferente do já resolvido (`ErrReferenceMismatch`) — essa checagem específica não tem equivalente barato de constraint de banco (uma `CHECK` não compara com o valor anterior da linha sem trigger), então fica no domínio por necessidade, não por excesso de cautela.
 
 ## Ledger (WalletLedgerEntry)
 
-_(Fase 3)_
+_(Fase 3 — ainda não implementado; entra em `internal/wallet`)_
 
 ## Reversões: REFUND e ROLLBACK
 
-_(Fase 3 — documentar explicitamente a interação entre os dois)_
+Ambas exigem referência obrigatória (`ErrMissingReference` se ausente) e revertem uma transação que precisa estar `PROCESSED` — não dá pra reverter algo ainda `PENDING`, `REJECTED` ou `FAILED`.
+
+`Transaction.ValidateReference(ref Transaction)` valida a compatibilidade: mesmo `providerId` (crítico — sem isso, uma referência poderia resolver contra a transação de **outro provider** só porque o `externalTransactionId` coincidiu, já que esse campo só é único dentro do escopo de um provider), `externalTransactionId` batendo com a string de referência, mesmo `playerId`/`walletId`/`roundId`, e mesmo `amount` (a comparação usa `Money.Equal`, que já cobre `currency` implicitamente). `gameId` foi deliberadamente **excluído** da checagem — o enunciado lista só "provider/player/wallet/currency/round" como dimensões obrigatórias; a suposição é que uma rodada já pertence a um único jogo, então `roundId` batendo já implica `gameId` batendo.
+
+**Interação REFUND + ROLLBACK**: `ValidateReference` só garante que uma referência é *estruturalmente* válida (aponta pra uma transação processada e compatível) — não decide se essa é a *primeira* reversão daquele tipo sobre essa referência. "Impedir reversão duplicada do mesmo tipo sobre a mesma referência" exige consultar outras transações já persistidas (uma query — "já existe um REFUND processado apontando pra este BET?"), então essa parte da regra fica pro caso de uso na Fase 5, que tem acesso ao repositório. O modelo de domínio aqui não impede, por si só, um REFUND e um ROLLBACK apontando pra mesma referência original — a decisão de permitir ou não essa combinação (e em que ordem) é responsabilidade do caso de uso, a documentar quando a Fase 5 definir isso.
+
+**Failure code distinto**: `FailureCode` é um tipo string próprio (mesmo idiom de `Kind`/`TxStatus`), preparado para códigos como "saldo insuficiente em BET" vs. "reversão excede saldo disponível" serem valores distintos — os códigos específicos ainda não foram enumerados, ficam pra Fase 5 quando a integração com `Wallet` definir exatamente quais falhas de negócio existem.
 
 ## Idempotência
 

@@ -404,6 +404,23 @@ func TestMoneyIsNegative(t *testing.T) {
 	})
 }
 
+func TestMoneyIsZero(t *testing.T) {
+	t.Run("positive", func(t *testing.T) {
+		m := Money{"BRL", 1}
+		assert.False(t, m.IsZero())
+	})
+
+	t.Run("zero", func(t *testing.T) {
+		m := Money{"BRL", 0}
+		assert.True(t, m.IsZero())
+	})
+
+	t.Run("negative", func(t *testing.T) {
+		m := Money{"BRL", -1}
+		assert.False(t, m.IsZero())
+	})
+}
+
 func TestMoneyIsPositive(t *testing.T) {
 	t.Run("positive", func(t *testing.T) {
 		m := Money{"BRL", 1}
