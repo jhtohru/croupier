@@ -1,0 +1,1 @@
+DROP INDEX wallet_ledger_entries_transaction_id_idx;
