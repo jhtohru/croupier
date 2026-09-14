@@ -63,10 +63,10 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[doc]` ARCHITECTURE.md → "WagerTransaction, estados e tipos", "Ledger (WalletLedgerEntry)", "Reversões: REFUND e ROLLBACK"
 
 ## Fase 4 — internal/inbox, internal/outbox (modelos)
-- [ ] `[!]` `Inbox`: `(consumerName, messageId)` único, hash, receipt, flag de conclusão
-- [ ] `[!]` `Outbox`: eventId estável, aggregate, type, payload, occurredAt, retry count, next send, status de publicação
-- [ ] `[~]` Testes unitários dos invariantes desses modelos (unicidade, transições de status)
-- [ ] `[doc]` ARCHITECTURE.md → "Inbox / Outbox" (esboço; detalhar de vez na Fase 8)
+- [x] `[!]` `Inbox`: `(consumerName, messageId)` único, hash, flag de conclusão (`completedAt *time.Time`) — "receipt" ficou como decisão em aberto, documentada no ARCHITECTURE.md
+- [x] `[!]` `Outbox`: eventId estável, aggregate, type, payload, occurredAt, retry count, next send, status de publicação (`PENDING`/`PUBLISHED`, sem estado terminal de falha)
+- [x] `[~]` Testes unitários dos invariantes desses modelos (unicidade é responsabilidade de schema/Fase 6; transições de status testadas)
+- [x] `[doc]` ARCHITECTURE.md → "Inbox / Outbox" (esboço de domínio; mecânica de fila/worker detalhada na Fase 8)
 
 ## Fase 5 — Casos de uso (Service dentro de wallet/wager, sem pacote `usecase` separado)
 - [ ] `[!]` `wallet.Service.Create` (playerId, initialBalance) — cria OPENING+ledger+outbox atomicamente se saldo inicial > 0; pula tudo isso se saldo = 0; conflito se player+currency já existe

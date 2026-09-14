@@ -103,7 +103,17 @@ _(Fase 5 — escolha entre lock pessimista, controle otimista com retry ou updat
 
 ## Inbox / Outbox
 
-_(Fase 4 esboço, detalhado na Fase 8)_
+Esboço de domínio (Fase 4) — mecânica real de fila/worker (SQS, publicação, agendamento) fica pra Fase 8.
+
+**`Inbox`** (`internal/inbox`) — dedup no nível do consumer SQS, chave `(consumerName, messageId)`. Guarda `payloadHash` (detectar se o mesmo `messageId` reaparece com conteúdo diferente) e `completedAt *time.Time` (nulo = ainda não concluído; ponteiro em vez de um `bool` separado, mesmo raciocínio de evitar dois campos representando o mesmo fato). `MarkCompleted()` tem só uma transição válida e retorna `ErrAlreadyCompleted` se chamado de novo — diferente do `Outbox.MarkPublished` (ver abaixo), aqui não há um cenário documentado de múltiplas instâncias disputando a mesma mensagem (a unicidade `(consumerName, messageId)` no schema já deveria impedir isso na inserção), então uma segunda chamada é tratada como bug, não como corrida esperada.
+
+Decisão em aberto, registrada aqui: o enunciado lista "receipt" como campo do Inbox, mas não ficou claro se é o `ReceiptHandle` do SQS (dado efêmero, válido só durante a janela de visibilidade de uma entrega específica — não há muito ganho em persistir, já que uma redelivery chega com handle novo) ou um recibo de domínio genérico. Não foi modelado ainda; a decisão de I/O de "usar o handle da entrega atual pra deletar da fila após o commit" fica pra Fase 8.
+
+**`Outbox`** (`internal/outbox`) — `Entry` com `id` (eventId estável, preservado entre republicações), `aggregateType`/`aggregateId`, `eventType`, `payload` (`[]byte`, snapshot JSON imutável — o outbox não precisa entender a estrutura interna do evento), `occurredAt`, `status` (`PENDING`/`PUBLISHED`), `retryCount`, `nextSendAt`.
+
+Só dois estados, sem um "FAILED" permanente: diferente de `WagerTransaction` (que tem falhas de negócio legítimas e terminais), uma falha de publicação de evento é sempre problema de infraestrutura transitório — o objetivo é sempre publicar eventualmente, nunca desistir. `MarkPublished()` é **idempotente** (chamar de novo já publicado não é erro) — decisão deliberadamente diferente do `Inbox`, porque aqui existe um cenário documentado de múltiplos workers publicadores disputando a mesma entrada (cenário obrigatório de teste); tratar a segunda confirmação como erro seria punir exatamente o caso que o sistema precisa tolerar. `ScheduleRetry(next time.Time)` recebe o próximo horário já calculado pelo chamador — a fórmula de backoff (exponencial, jitter, etc.) é decisão operacional da Fase 8, não do modelo de domínio; `Entry` só registra o agendamento, não decide o algoritmo.
+
+Nenhum dos dois modela coordenação entre múltiplas instâncias de worker (lease, `claimedUntil`, `SELECT ... FOR UPDATE SKIP LOCKED`) — isso é decisão de repositório/worker da Fase 8, não do tipo de domínio.
 
 ## Persistência (PostgreSQL)
 
