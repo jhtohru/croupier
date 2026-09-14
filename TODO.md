@@ -69,10 +69,10 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[doc]` ARCHITECTURE.md → "Inbox / Outbox" (esboço de domínio; mecânica de fila/worker detalhada na Fase 8)
 
 ## Fase 5 — Casos de uso (Service dentro de wallet/wager, sem pacote `usecase` separado)
-- [ ] `[!]` `wallet.Service.Create` (playerId, initialBalance) — cria OPENING+ledger+outbox atomicamente se saldo inicial > 0; pula tudo isso se saldo = 0; conflito se player+currency já existe
-- [ ] `[!]` `wager.Service.Submit` (idempotência via hash canônico do payload, chave `{providerId}:{externalTransactionId}`) — compartilhado entre HTTP e SQS
-- [ ] `[!]` Lógica de replay: mesma key+conteúdo → retorna resultado persistido (`idempotentReplay: true`) com o saldo **observado originalmente**, não o atual
-- [ ] `[!]` Conflito: mesma key com conteúdo diferente → erro; mesmo `(providerId, externalTransactionId)` não pode reaplicar com key diferente
+- [x] `[!]` `wallet.Service.Create` (playerId, initialBalance) — implementado como `app.WalletCreator.Create` (não `wallet.Service`; ver correção de arquitetura acima sobre `internal/app`) — cria OPENING+ledger+outbox atomicamente se saldo inicial > 0; pula tudo isso se saldo = 0; conflito se player+currency já existe
+- [x] `[!]` `wager.Service.Submit` — implementado como `app.WagerSubmitter.Submit`: idempotência via hash canônico do payload, kind-specific processing (BET/WIN/LOSS/REFUND/ROLLBACK, incluindo direção de ROLLBACK dependendo do tipo referenciado), resolução de referência com `PENDING_REFERENCE`, prevenção de reversão duplicada, failure codes distintos (saldo insuficiente em BET vs. reversão excedendo saldo) — compartilhável entre HTTP e SQS (mesmo input struct)
+- [x] `[!]` Lógica de replay: mesma key+conteúdo → retorna resultado persistido (`idempotentReplay: true`) com o saldo **observado originalmente** (via `WalletRepository.FindLedgerEntryByTransactionID`), não o atual — testado explicitamente movendo o saldo entre a submissão original e o replay
+- [x] `[!]` Conflito: mesma key com conteúdo diferente → `ErrIdempotencyConflict` — nota: "mesmo (providerId, externalTransactionId) não pode reaplicar com key diferente" é validação de header vs. corpo, fica na camada HTTP (Fase 7), já que `Submit` deriva a chave diretamente de `providerId`+`externalTransactionId`, não recebe um header separado
 - [ ] `[!]` `wager.Service.Get` / `GetByProvider` — isolamento por providerId vindo da identidade autenticada
 - [ ] `[!]` `wallet.Service.Reconciliation`: recalcula saldo a partir do ledger (incluindo OPENING), compara com saldo armazenado, retorna `difference`, flag de consistência, contagem de entradas — não altera saldo
 - [ ] `[!]` Estratégia de concorrência por wallet (escolher: pessimista, otimista c/ retry, ou update condicional atômico) — decisão de design que molda a interface `wallet.Repository`

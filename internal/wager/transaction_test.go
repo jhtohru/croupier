@@ -493,6 +493,7 @@ func validReferencePair(t *testing.T) (tx Transaction, ref Transaction) {
 
 	ref = Transaction{
 		status:                TxStatusProcessed,
+		kind:                  KindBet,
 		providerID:            providerID,
 		externalTransactionID: extID,
 		playerID:              playerID,
@@ -501,6 +502,7 @@ func validReferencePair(t *testing.T) (tx Transaction, ref Transaction) {
 		amount:                amount,
 	}
 	tx = Transaction{
+		kind:                           KindRefund,
 		providerID:                     providerID,
 		playerID:                       playerID,
 		walletID:                       walletID,
@@ -580,6 +582,42 @@ func TestTransactionValidateReference(t *testing.T) {
 		}
 		ref.amount = otherAmount
 		err = tx.ValidateReference(ref)
+		assert.ErrorIs(t, err, ErrInvalidReference)
+	})
+
+	t.Run("refund referencing win is rejected", func(t *testing.T) {
+		tx, ref := validReferencePair(t)
+		ref.kind = KindWin
+		err := tx.ValidateReference(ref)
+		assert.ErrorIs(t, err, ErrInvalidReference)
+	})
+
+	t.Run("rollback referencing bet", func(t *testing.T) {
+		tx, ref := validReferencePair(t)
+		tx.kind = KindRollback
+		ref.kind = KindBet
+		assert.NoError(t, tx.ValidateReference(ref))
+	})
+
+	t.Run("rollback referencing win", func(t *testing.T) {
+		tx, ref := validReferencePair(t)
+		tx.kind = KindRollback
+		ref.kind = KindWin
+		assert.NoError(t, tx.ValidateReference(ref))
+	})
+
+	t.Run("rollback referencing refund", func(t *testing.T) {
+		tx, ref := validReferencePair(t)
+		tx.kind = KindRollback
+		ref.kind = KindRefund
+		assert.NoError(t, tx.ValidateReference(ref))
+	})
+
+	t.Run("rollback referencing rollback is rejected", func(t *testing.T) {
+		tx, ref := validReferencePair(t)
+		tx.kind = KindRollback
+		ref.kind = KindRollback
+		err := tx.ValidateReference(ref)
 		assert.ErrorIs(t, err, ErrInvalidReference)
 	})
 

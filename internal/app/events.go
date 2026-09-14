@@ -18,8 +18,10 @@ import (
 // literally (walletId, transactionId, direction, money, balanceBefore,
 // balanceAfter, walletVersion).
 const (
-	EventTypeWagerTransactionProcessed = "WagerTransactionProcessed"
-	EventTypeWalletBalanceChanged      = "WalletBalanceChanged"
+	EventTypeWagerTransactionProcessed        = "WagerTransactionProcessed"
+	EventTypeWagerTransactionRejected         = "WagerTransactionRejected"
+	EventTypeWagerTransactionPendingReference = "WagerTransactionPendingReference"
+	EventTypeWalletBalanceChanged             = "WalletBalanceChanged"
 )
 
 type wagerTransactionProcessedData struct {
@@ -41,6 +43,56 @@ func newWagerTransactionProcessedEvent(tx *wager.Transaction) (*outbox.Entry, er
 		AggregateType: "WagerTransaction",
 		AggregateID:   tx.ID(),
 		EventType:     EventTypeWagerTransactionProcessed,
+		Payload:       payload,
+		OccurredAt:    time.Now(),
+	})
+}
+
+type wagerTransactionRejectedData struct {
+	TransactionID uuid.UUID         `json:"transactionId"`
+	Kind          wager.Kind        `json:"kind"`
+	FailureCode   wager.FailureCode `json:"failureCode"`
+}
+
+func newWagerTransactionRejectedEvent(tx *wager.Transaction) (*outbox.Entry, error) {
+	payload, err := json.Marshal(wagerTransactionRejectedData{
+		TransactionID: tx.ID(),
+		Kind:          tx.Kind(),
+		FailureCode:   tx.FailureCode(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return outbox.NewEntry(outbox.NewEntryInput{
+		AggregateType: "WagerTransaction",
+		AggregateID:   tx.ID(),
+		EventType:     EventTypeWagerTransactionRejected,
+		Payload:       payload,
+		OccurredAt:    time.Now(),
+	})
+}
+
+type wagerTransactionPendingReferenceData struct {
+	TransactionID                  uuid.UUID `json:"transactionId"`
+	ReferenceExternalTransactionID string    `json:"referenceExternalTransactionId"`
+}
+
+func newWagerTransactionPendingReferenceEvent(tx *wager.Transaction) (*outbox.Entry, error) {
+	var refExtID string
+	if tx.ReferenceExternalTransactionID() != nil {
+		refExtID = *tx.ReferenceExternalTransactionID()
+	}
+	payload, err := json.Marshal(wagerTransactionPendingReferenceData{
+		TransactionID:                  tx.ID(),
+		ReferenceExternalTransactionID: refExtID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return outbox.NewEntry(outbox.NewEntryInput{
+		AggregateType: "WagerTransaction",
+		AggregateID:   tx.ID(),
+		EventType:     EventTypeWagerTransactionPendingReference,
 		Payload:       payload,
 		OccurredAt:    time.Now(),
 	})

@@ -55,6 +55,15 @@ func (r *fakeWalletRepository) SaveLedgerEntry(ctx context.Context, e *wallet.Le
 	return nil
 }
 
+func (r *fakeWalletRepository) FindLedgerEntryByTransactionID(ctx context.Context, transactionID uuid.UUID) (*wallet.LedgerEntry, error) {
+	for _, e := range r.ledger {
+		if e.TransactionID() == transactionID {
+			return e, nil
+		}
+	}
+	return nil, ErrLedgerEntryNotFound
+}
+
 type fakeWagerRepository struct {
 	transactions []*wager.Transaction
 }
@@ -62,6 +71,27 @@ type fakeWagerRepository struct {
 func (r *fakeWagerRepository) Save(ctx context.Context, tx *wager.Transaction) error {
 	r.transactions = append(r.transactions, tx)
 	return nil
+}
+
+func (r *fakeWagerRepository) FindByProviderAndExternalID(ctx context.Context, providerID, externalTransactionID string) (*wager.Transaction, error) {
+	for _, tx := range r.transactions {
+		if tx.ProviderID() == providerID && tx.ExternalTransactionID() == externalTransactionID {
+			return tx, nil
+		}
+	}
+	return nil, ErrWagerTransactionNotFound
+}
+
+func (r *fakeWagerRepository) FindReversal(ctx context.Context, referencedTransactionID uuid.UUID, kind wager.Kind) (*wager.Transaction, error) {
+	for _, tx := range r.transactions {
+		if tx.Kind() == kind &&
+			tx.Status() == wager.TxStatusProcessed &&
+			tx.ReferenceTransactionID() != nil &&
+			*tx.ReferenceTransactionID() == referencedTransactionID {
+			return tx, nil
+		}
+	}
+	return nil, ErrWagerTransactionNotFound
 }
 
 type fakeOutboxRepository struct {

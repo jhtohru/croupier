@@ -200,7 +200,8 @@ func (tx Transaction) ValidateReference(ref Transaction) error {
 	if tx.referenceExternalTransactionID == nil {
 		return ErrMissingReference
 	}
-	if ref.status != TxStatusProcessed ||
+	if !referenceableKind(tx.kind, ref.kind) ||
+		ref.status != TxStatusProcessed ||
 		ref.providerID != tx.providerID ||
 		ref.externalTransactionID != *tx.referenceExternalTransactionID ||
 		ref.playerID != tx.playerID ||
@@ -212,6 +213,20 @@ func (tx Transaction) ValidateReference(ref Transaction) error {
 		return ErrInvalidReference
 	}
 	return nil
+}
+
+// referenceableKind reports whether a transaction of kind may reference a
+// transaction of refKind. REFUND only ever reverses a processed BET; ROLLBACK
+// reverses BET, WIN or REFUND (never OPENING, LOSS, or another ROLLBACK).
+func referenceableKind(kind, refKind Kind) bool {
+	switch kind {
+	case KindRefund:
+		return refKind == KindBet
+	case KindRollback:
+		return refKind == KindBet || refKind == KindWin || refKind == KindRefund
+	default:
+		return false
+	}
 }
 
 func (tx Transaction) PayloadHash() [32]byte {
