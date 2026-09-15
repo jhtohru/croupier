@@ -56,7 +56,20 @@ Ajuste usuário/senha/porta se você alterou os valores padrão do `.env.example
 
 ## Inicialização das filas (SQS / LocalStack)
 
-_(a preencher na Fase 8)_
+Automática — não precisa rodar nada manualmente. Suba o LocalStack:
+```sh
+docker compose up -d localstack
+```
+
+`deploy/localstack/init-queues.sh` roda sozinho dentro do container (hook `ready.d` do LocalStack) assim que o serviço SQS sobe, e cria:
+- `wager-transactions.fifo` — fila de entrada (submissões de wager transaction via SQS, mesmo formato do corpo de `POST /wagering/transactions`), com `RedrivePolicy` (`maxReceiveCount=5`) apontando pra...
+- `wager-transactions-dlq.fifo` — dead-letter queue
+- `wallet-events.fifo` — fila de saída (eventos de domínio publicados pelo outbox worker)
+
+O healthcheck do serviço só reporta "healthy" depois que o script termina, então `docker compose up -d --wait localstack` (ou simplesmente esperar o `docker compose ps` mostrar `healthy`) garante que as filas já existem antes de qualquer coisa tentar usá-las. Conferir manualmente:
+```sh
+docker exec <container-do-localstack> awslocal sqs list-queues
+```
 
 ## Autenticação (IdP / Keycloak)
 
@@ -123,10 +136,18 @@ go test -race ./...
 go vet ./...
 ```
 
-Testes de integração de `internal/postgres` (`//go:build integration`) exigem Postgres real com as migrations aplicadas — ver "Migrations" acima:
+Testes de integração de `internal/postgres` e `internal/httpapi` (`//go:build integration`) exigem Postgres real com as migrations aplicadas — ver "Migrations" acima:
 ```sh
 docker compose up -d postgres
 # aplicar as migrations (comandos na seção "Migrations")
 TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
-  go test -tags integration -race -count=1 ./internal/postgres/...
+  go test -tags integration -race -count=1 ./internal/postgres/... ./internal/httpapi/...
+```
+
+Testes de integração de `internal/sqs` exigem Postgres **e** LocalStack (as filas são provisionadas sozinhas — ver "Inicialização das filas" acima):
+```sh
+docker compose up -d postgres localstack
+TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
+SQS_ENDPOINT="http://localhost:4566" \
+  go test -tags integration -race -count=1 ./internal/sqs/...
 ```

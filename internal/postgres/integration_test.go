@@ -4,6 +4,7 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -15,7 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/jhtohru/croupier/internal/app"
+	"github.com/jhtohru/croupier/internal/inbox"
 	"github.com/jhtohru/croupier/internal/money"
+	"github.com/jhtohru/croupier/internal/outbox"
 	"github.com/jhtohru/croupier/internal/postgres"
 	"github.com/jhtohru/croupier/internal/wager"
 	"github.com/jhtohru/croupier/internal/wallet"
@@ -188,6 +191,126 @@ func TestWagerSubmitterConcurrentBets(t *testing.T) {
 	assert.Equal(t, wallet.DirectionDebit, entries[0].Direction())
 }
 
+// drainOutboxBacklog claims and marks published every currently-due PENDING
+// entry — the integration suite never truncates the database between runs
+// (every test here relies on that, using uuid.New() throughout to avoid
+// collisions instead), so earlier tests' own outbox entries would otherwise
+// still be sitting there PENDING and due, and FindDueForUpdate has no reason
+// to skip them (a real OutboxWorker shouldn't skip old backlog either).
+// Draining first is what a real OutboxWorker does anyway — repeatedly call
+// RunOnce until nothing's left — so it's also the realistic setup, not just
+// a test workaround.
+func drainOutboxBacklog(t *testing.T, outboxRepo *postgres.OutboxRepository, txManager *postgres.TxManager) {
+	t.Helper()
+	const maxIterations = 10000
+	for i := 0; i < maxIterations; i++ {
+		var found bool
+		err := txManager.WithinTx(context.Background(), func(ctx context.Context) error {
+			e, err := outboxRepo.FindDueForUpdate(ctx)
+			if err != nil {
+				if errors.Is(err, app.ErrOutboxEntryNotFound) {
+					return nil
+				}
+				return err
+			}
+			found = true
+			e.MarkPublished()
+			return outboxRepo.SaveAll(ctx, e)
+		})
+		require.NoError(t, err)
+		if !found {
+			return
+		}
+	}
+	t.Fatalf("drainOutboxBacklog: backlog did not drain within %d iterations", maxIterations)
+}
+
+func TestOutboxRepositoryFindDueForUpdate(t *testing.T) {
+	pool := testPool(t)
+	outboxRepo := postgres.NewOutboxRepository(pool)
+	txManager := postgres.NewTxManager(pool)
+	drainOutboxBacklog(t, outboxRepo, txManager)
+
+	entry, err := outbox.NewEntry(outbox.NewEntryInput{
+		AggregateType: "Wallet", AggregateID: uuid.New(),
+		EventType: "WalletBalanceChanged", Payload: []byte(`{}`), OccurredAt: time.Now(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, outboxRepo.SaveAll(context.Background(), entry))
+
+	var claimed *outbox.Entry
+	err = txManager.WithinTx(context.Background(), func(ctx context.Context) error {
+		var err error
+		claimed, err = outboxRepo.FindDueForUpdate(ctx)
+		if err != nil {
+			return err
+		}
+		claimed.MarkPublished()
+		return outboxRepo.SaveAll(ctx, claimed)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, entry.ID(), claimed.ID())
+
+	// Now PUBLISHED — must never be picked up again.
+	err = txManager.WithinTx(context.Background(), func(ctx context.Context) error {
+		_, err := outboxRepo.FindDueForUpdate(ctx)
+		return err
+	})
+	assert.ErrorIs(t, err, app.ErrOutboxEntryNotFound)
+}
+
+// TestOutboxRepositoryFindDueForUpdateSkipsLockedRows proves the "múltiplos
+// publishers" safety claim from TODO.md's Fase 8 against real Postgres, not
+// just by reading the SQL: two goroutines each open their own transaction
+// and call FindDueForUpdate concurrently against two pending entries — SKIP
+// LOCKED must hand them one distinct entry each, never the same one twice.
+func TestOutboxRepositoryFindDueForUpdateSkipsLockedRows(t *testing.T) {
+	pool := testPool(t)
+	outboxRepo := postgres.NewOutboxRepository(pool)
+	txManager := postgres.NewTxManager(pool)
+	drainOutboxBacklog(t, outboxRepo, txManager)
+
+	var entries []*outbox.Entry
+	for i := 0; i < 2; i++ {
+		e, err := outbox.NewEntry(outbox.NewEntryInput{
+			AggregateType: "Wallet", AggregateID: uuid.New(),
+			EventType: "WalletBalanceChanged", Payload: []byte(`{}`), OccurredAt: time.Now(),
+		})
+		require.NoError(t, err)
+		require.NoError(t, outboxRepo.SaveAll(context.Background(), e))
+		entries = append(entries, e)
+	}
+
+	var wg sync.WaitGroup
+	claimedIDs := make([]uuid.UUID, 2)
+	claimedSignal := make(chan struct{}, 2)
+	holdRelease := make(chan struct{})
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_ = txManager.WithinTx(context.Background(), func(ctx context.Context) error {
+				claimed, err := outboxRepo.FindDueForUpdate(ctx)
+				if err != nil {
+					return err
+				}
+				claimedIDs[i] = claimed.ID()
+				claimedSignal <- struct{}{}
+				<-holdRelease // keep the row lock open until both goroutines have claimed one
+				claimed.MarkPublished()
+				return outboxRepo.SaveAll(ctx, claimed)
+			})
+		}(i)
+	}
+	<-claimedSignal
+	<-claimedSignal
+	close(holdRelease)
+	wg.Wait()
+
+	assert.NotEqual(t, claimedIDs[0], claimedIDs[1])
+	assert.ElementsMatch(t, []uuid.UUID{entries[0].ID(), entries[1].ID()}, claimedIDs)
+}
+
 // TestPendingReferenceResolverRealPostgres exercises the whole
 // PENDING_REFERENCE retry path against real Postgres: a REFUND submitted
 // before its BET exists parks, a first ResolveDue leaves it parked and
@@ -263,6 +386,35 @@ func TestPendingReferenceResolverRealPostgres(t *testing.T) {
 	finalWallet, err := walletRepo.FindByID(context.Background(), w.ID())
 	require.NoError(t, err)
 	assert.Equal(t, balance, finalWallet.Balance()) // BET debited 3000, REFUND credited it back
+}
+
+func TestInboxRepositoryRoundTrip(t *testing.T) {
+	pool := testPool(t)
+	repo := postgres.NewInboxRepository(pool)
+
+	hash := [32]byte{1, 2, 3, 4}
+	entry, err := inbox.New(inbox.NewInput{
+		ConsumerName: "wager-transactions-consumer", MessageID: uuid.New().String(), PayloadHash: hash,
+	})
+	require.NoError(t, err)
+	require.NoError(t, repo.Save(context.Background(), entry))
+
+	got, err := repo.FindByConsumerAndMessage(context.Background(), entry.ConsumerName(), entry.MessageID())
+	require.NoError(t, err)
+	assert.Equal(t, entry.ConsumerName(), got.ConsumerName())
+	assert.Equal(t, entry.MessageID(), got.MessageID())
+	assert.Equal(t, entry.PayloadHash(), got.PayloadHash())
+	assert.False(t, got.IsCompleted())
+
+	require.NoError(t, got.MarkCompleted())
+	require.NoError(t, repo.Save(context.Background(), got))
+
+	completed, err := repo.FindByConsumerAndMessage(context.Background(), entry.ConsumerName(), entry.MessageID())
+	require.NoError(t, err)
+	assert.True(t, completed.IsCompleted())
+
+	_, err = repo.FindByConsumerAndMessage(context.Background(), "wager-transactions-consumer", "does-not-exist")
+	assert.ErrorIs(t, err, app.ErrInboxEntryNotFound)
 }
 
 func mustMoney(t *testing.T, minorUnits int64) money.Money {

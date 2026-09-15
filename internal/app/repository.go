@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jhtohru/croupier/internal/inbox"
 	"github.com/jhtohru/croupier/internal/money"
 	"github.com/jhtohru/croupier/internal/outbox"
 	"github.com/jhtohru/croupier/internal/wager"
@@ -19,6 +20,8 @@ var (
 	ErrLedgerEntryNotFound      = errors.New("ledger entry not found")
 	ErrWagerTransactionNotFound = errors.New("wager transaction not found")
 	ErrIdempotencyConflict      = errors.New("idempotency conflict")
+	ErrInboxEntryNotFound       = errors.New("inbox entry not found")
+	ErrOutboxEntryNotFound      = errors.New("outbox entry not found")
 )
 
 // TxManager coordinates atomicity across repositories: repository calls made
@@ -63,4 +66,20 @@ type WagerRepository interface {
 
 type OutboxRepository interface {
 	SaveAll(ctx context.Context, entries ...*outbox.Entry) error
+	// FindDueForUpdate returns the single oldest PENDING entry whose
+	// next_send_at is due, row-locked (SELECT ... FOR UPDATE SKIP LOCKED) so
+	// concurrent OutboxWorker instances never grab the same entry — call
+	// only inside TxManager.WithinTx. Returns ErrOutboxEntryNotFound when
+	// nothing is due; the lock (and the entry, if the caller's transaction
+	// never commits — a crash mid-publish included) is released back to
+	// other workers as soon as the transaction ends, so no separate lease/
+	// claim bookkeeping is needed for recovering abandoned work.
+	FindDueForUpdate(ctx context.Context) (*outbox.Entry, error)
+}
+
+// InboxRepository backs SQS consumer deduplication: (consumerName,
+// messageId) identifies one delivery attempt's worth of work.
+type InboxRepository interface {
+	FindByConsumerAndMessage(ctx context.Context, consumerName, messageID string) (*inbox.Inbox, error)
+	Save(ctx context.Context, i *inbox.Inbox) error
 }

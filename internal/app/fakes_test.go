@@ -176,9 +176,35 @@ type fakeOutboxRepository struct {
 	entries []*outbox.Entry
 }
 
+// SaveAll upserts by id, mirroring the real Postgres repository's behavior —
+// OutboxWorker calls this again on entries fakeOutboxRepository already
+// holds (to advance status/retry_count), and treating that as a fresh
+// append would double-count them.
 func (r *fakeOutboxRepository) SaveAll(ctx context.Context, entries ...*outbox.Entry) error {
-	r.entries = append(r.entries, entries...)
+	for _, e := range entries {
+		var found bool
+		for i, existing := range r.entries {
+			if existing.ID() == e.ID() {
+				r.entries[i] = e
+				found = true
+				break
+			}
+		}
+		if !found {
+			r.entries = append(r.entries, e)
+		}
+	}
 	return nil
+}
+
+func (r *fakeOutboxRepository) FindDueForUpdate(ctx context.Context) (*outbox.Entry, error) {
+	now := time.Now()
+	for _, e := range r.entries {
+		if e.Status() == outbox.StatusPending && !e.NextSendAt().After(now) {
+			return e, nil
+		}
+	}
+	return nil, ErrOutboxEntryNotFound
 }
 
 type fakeTxManager struct{}

@@ -133,13 +133,13 @@ Esboço de domínio (Fase 4) — mecânica real de fila/worker (SQS, publicaçã
 
 **`Inbox`** (`internal/inbox`) — dedup no nível do consumer SQS, chave `(consumerName, messageId)`. Guarda `payloadHash` (detectar se o mesmo `messageId` reaparece com conteúdo diferente) e `completedAt *time.Time` (nulo = ainda não concluído; ponteiro em vez de um `bool` separado, mesmo raciocínio de evitar dois campos representando o mesmo fato). `MarkCompleted()` tem só uma transição válida e retorna `ErrAlreadyCompleted` se chamado de novo — diferente do `Outbox.MarkPublished` (ver abaixo), aqui não há um cenário documentado de múltiplas instâncias disputando a mesma mensagem (a unicidade `(consumerName, messageId)` no schema já deveria impedir isso na inserção), então uma segunda chamada é tratada como bug, não como corrida esperada.
 
-Decisão em aberto, registrada aqui: o enunciado lista "receipt" como campo do Inbox, mas não ficou claro se é o `ReceiptHandle` do SQS (dado efêmero, válido só durante a janela de visibilidade de uma entrega específica — não há muito ganho em persistir, já que uma redelivery chega com handle novo) ou um recibo de domínio genérico. Não foi modelado ainda; a decisão de I/O de "usar o handle da entrega atual pra deletar da fila após o commit" fica pra Fase 8.
+Decisão que ficou em aberto até a Fase 8, resolvida agora: o enunciado lista "receipt" como campo do Inbox, mas não ficou claro se é o `ReceiptHandle` do SQS ou um recibo de domínio genérico. Ficou de fora do modelo de propósito — `ReceiptHandle` é dado efêmero, válido só durante a janela de visibilidade de uma entrega específica (uma redelivery chega com handle novo), não sobrevive nem faz sentido persistir; `internal/sqs.Consumer` usa o handle da entrega atual (`msg.ReceiptHandle`, do SDK) diretamente pra deletar da fila após o commit, sem passar pelo domínio `Inbox`.
 
 **`Outbox`** (`internal/outbox`) — `Entry` com `id` (eventId estável, preservado entre republicações), `aggregateType`/`aggregateId`, `eventType`, `payload` (`[]byte`, snapshot JSON imutável — o outbox não precisa entender a estrutura interna do evento), `occurredAt`, `status` (`PENDING`/`PUBLISHED`), `retryCount`, `nextSendAt`.
 
 Só dois estados, sem um "FAILED" permanente: diferente de `WagerTransaction` (que tem falhas de negócio legítimas e terminais), uma falha de publicação de evento é sempre problema de infraestrutura transitório — o objetivo é sempre publicar eventualmente, nunca desistir. `MarkPublished()` é **idempotente** (chamar de novo já publicado não é erro) — decisão deliberadamente diferente do `Inbox`, porque aqui existe um cenário documentado de múltiplos workers publicadores disputando a mesma entrada (cenário obrigatório de teste); tratar a segunda confirmação como erro seria punir exatamente o caso que o sistema precisa tolerar. `ScheduleRetry(next time.Time)` recebe o próximo horário já calculado pelo chamador — a fórmula de backoff (exponencial, jitter, etc.) é decisão operacional da Fase 8, não do modelo de domínio; `Entry` só registra o agendamento, não decide o algoritmo.
 
-Nenhum dos dois modela coordenação entre múltiplas instâncias de worker (lease, `claimedUntil`, `SELECT ... FOR UPDATE SKIP LOCKED`) — isso é decisão de repositório/worker da Fase 8, não do tipo de domínio.
+Nenhum dos dois modela coordenação entre múltiplas instâncias de worker (lease, `claimedUntil`, `SELECT ... FOR UPDATE SKIP LOCKED`) — ficou mesmo fora do tipo de domínio, como planejado; resolvido na Fase 8 inteiramente no repositório (`OutboxRepository.FindDueForUpdate`), sem `Entry` precisar saber que existe coordenação nenhuma — ver "Mensageria (SQS)" abaixo.
 
 ## Persistência (PostgreSQL)
 
@@ -179,7 +179,43 @@ Migrations em `internal/postgres/migrations`, uma tabela por migration, geridas 
 
 ## Mensageria (SQS)
 
-_(Fase 8)_
+**Duas filas, dois sentidos, nomes decididos aqui (não especificados no enunciado original)**:
+- `wager-transactions.fifo` (+ `wager-transactions-dlq.fifo`) — **entrada**: providers (ou o harness de teste do desafio) publicam submissões de wager transaction aqui, no mesmo formato do corpo de `POST /wagering/transactions`. `internal/sqs.Consumer` consome.
+- `wallet-events.fifo` — **saída**: os eventos de domínio que já existiam desde a Fase 5 (`WagerTransactionProcessed`, `WagerTransactionRejected`, `WagerTransactionPendingReference`, `WalletBalanceChanged`) via `internal/app/events.go`, publicados pelo `OutboxWorker`.
+
+Ambas provisionadas automaticamente por `deploy/localstack/init-queues.sh`, montado como hook `ready.d` do próprio container LocalStack (roda uma vez, no start; o healthcheck do serviço só fica "healthy" depois do script terminar). `wager-transactions.fifo` tem `RedrivePolicy` com `maxReceiveCount=5` apontando pra `wager-transactions-dlq.fifo`.
+
+### Consumer (entrada)
+
+`internal/sqs.Consumer.Run` faz long-poll (`ReceiveMessage`, `WaitTimeSeconds` configurável) num loop que respeita `ctx` — sai assim que `ctx` é cancelado, mas deixa uma mensagem que já começou a processar terminar antes de checar `ctx` de novo (não aborta no meio). Cada mensagem passa por `handle`:
+
+1. Calcula o hash do payload (`sha256`), busca `(consumerName, messageId)` no `InboxRepository`.
+2. **Não existe ainda** → cria a entrada (`inbox.New` + `Save`, ainda não completa) e segue pra 4.
+3. **Existe, hash diferente** → erro permanente (mesmo `messageId`, conteúdo diferente — não deveria acontecer nunca; não apaga a mensagem, deixa o `maxReceiveCount` levar pra DLQ).
+4. **Existe, já completa** → é exatamente o cenário obrigatório "interrompido depois do commit, antes de remover da fila": a mensagem foi redelivered porque a remoção anterior falhou ou nunca aconteceu, mas o trabalho já está feito. Não reprocessa, só confirma (deleta) e segue.
+5. **Existe, não completa** (mesmo hash) → uma tentativa anterior morreu entre processar e marcar completo. Reprocessa — **isso é seguro mesmo se o processamento anterior na verdade tiver terminado**, porque `WagerSubmitter.Submit` (passo seguinte) já é idempotente por `providerId:externalTransactionId` desde a Fase 5. O `Inbox` aqui é uma camada de dedup mais barata (evita reabrir uma transação inteira quando dá pra responder só com um `SELECT`), não o mecanismo que garante correção — essa garantia é do `Submit`.
+6. Chama `WagerSubmitter.Submit` com o mesmo `SubmitWagerTransactionInput` que a rota HTTP usa — os dois caminhos de ingestão têm garantias idênticas por construção, não por coincidência.
+7. Sucesso → marca o `Inbox` completo, salva.
+
+A mensagem só é removida da fila (`DeleteMessage`) depois que `handle` retorna sem erro — ou seja, depois que `Submit` já commitou no Postgres. Qualquer erro em qualquer ponto do caminho significa: não deleta, deixa o `visibility timeout` da fila expirar e redelivered — sem retry/backoff próprio na aplicação, de propósito (ver TODO.md, Fase 8: reinventar isso por cima do que o SQS já garante seria complexidade sem ganho).
+
+### Publisher + OutboxWorker (saída)
+
+`app.OutboxWorker.RunOnce` (chamado sob demanda por quem for orquestrar a cadência — Fase 10 — mesmo padrão do `PendingReferenceResolver.ResolveDue`) faz tudo dentro de uma `TxManager.WithinTx`:
+
+1. `OutboxRepository.FindDueForUpdate` — `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1` na entrada `PENDING` mais antiga já due.
+2. Publica via `internal/sqs.Publisher.Publish` — envelope `{eventId, aggregateType, aggregateId, eventType, occurredAt, data}`, `MessageGroupId` = `aggregateId` (ordena eventos do mesmo agregado entre si, paraleliza entre agregados diferentes), `MessageDeduplicationId` = `eventId` (o próprio `id` da linha, nunca muda entre tentativas — é isso que dá "republicação preservando eventId": um consumidor lendo o corpo da mensagem reconhece a mesma entrega lógica mesmo depois de uma falha e reenvio).
+3. Sucesso → `MarkPublished` (idempotente); falha → `ScheduleRetry` com backoff exponencial (mesma função `backoffDelay` do `PendingReferenceResolver`, reaproveitada).
+
+**"Múltiplos publishers" e "recovery de trabalho abandonado" vêm inteiramente do lock da consulta, não de uma coluna de lease**: o `FOR UPDATE SKIP LOCKED` só existe enquanto a transação que o pegou está aberta. Dois workers concorrentes nunca pegam a mesma linha (`SKIP LOCKED` faz o segundo pular pra próxima). Se um worker morre no meio (depois de publicar, antes de commitar o `MarkPublished`), a conexão cai, o lock some, e a linha volta a ficar disponível pro próximo worker — que republica (com o mesmo `eventId`, ponto anterior). **Verificado contra Postgres real**, não só por leitura do SQL: duas goroutines disputando duas entradas `PENDING` concorrentemente nunca pegam a mesma (`TestOutboxRepositoryFindDueForUpdateSkipsLockedRows`).
+
+### O que foi verificado de verdade
+
+`internal/sqs/integration_test.go` (`//go:build integration`) roda contra LocalStack real, não mock: `TestConsumerConsumesRealSQSMessage` publica uma mensagem crua (como um provider faria) e confirma que o saldo da wallet muda; `TestPublisherAndOutboxWorkerOverRealSQS` cria uma wallet com saldo inicial (gera outbox de verdade), drena com `OutboxWorker` real publicando num `Publisher` real, e lê de volta da fila real conferindo `eventId`/`eventType`.
+
+**Decisão de infraestrutura de teste que vale registrar**: os testes de integração deste pacote criam uma fila FIFO efêmera própria por execução (`CreateQueue`/`DeleteQueue` no `t.Cleanup`), em vez de reusar as filas de produção provisionadas pelo `init-queues.sh`. Motivo encontrado por observação direta, não suposição: compartilhar uma fila entre muitas execuções ao longo de uma sessão de testes deixou o LocalStack pouco confiável (mensagens novas às vezes nunca ficavam visíveis pra `ReceiveMessage`); a correção óbvia — `PurgeQueue` antes de cada execução — piorou o problema em vez de resolver, porque `PurgeQueue` é assíncrono mesmo na AWS real ("a deleção tipicamente completa em até 60 segundos", pela própria documentação da API), e um purge seguido imediatamente de um `SendMessage`+`ReceiveMessage` no mesmo processo reproduzia a falha de forma consistente. Fila efêmera dedicada não tem histórico nenhum pra purgar, e evita a classe inteira de problema.
+
+**Retry/DLQ não verificado de ponta a ponta ainda**: forçar uma mensagem a falhar as 5 tentativas (`maxReceiveCount`) e observar ela cair de fato na `wager-transactions-dlq.fifo` fica pra Fase 12, que já tem cenário obrigatório dedicado pra isso — junto com "matar o consumer no meio e verificar redelivery" contra infraestrutura real (hoje só coberto por unit test com fake, `TestConsumerHandle/redelivery_of_already-completed_work_does_not_resubmit`, que simula exatamente esse cenário sem precisar matar um processo de verdade).
 
 ## Autenticação e Autorização
 
