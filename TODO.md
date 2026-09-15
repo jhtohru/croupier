@@ -118,12 +118,12 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[doc]` README.md → "Autenticação (IdP / Keycloak)"; ARCHITECTURE.md → "Autenticação e Autorização"
 
 ## Fase 10 — cmd/croupier (Uber Fx) & Docker Compose & Env
-- [ ] `[!]` Módulos Fx (`fx.Module`, `fx.Provide`, `fx.Invoke`) para server, workers, recursos
-- [ ] `[!]` `fx.Lifecycle` com timeouts de start/shutdown observáveis
-- [ ] `[!]` `docker-compose.yml`: app, Postgres, LocalStack, Keycloak — os três serviços de infra já estão no ar e verificados (subidos de verdade, healthcheck passando, testado que Postgres aceita conexão, SQS do LocalStack responde, Keycloak serve HTTP) — falta o serviço `app` (Dockerfile + `cmd/croupier`, Fase 10 adiante)
-- [x] `[!]` `.env.example` com valores locais (sem secrets) — cobre Postgres/LocalStack/Keycloak; vai crescer quando HTTP/SQS/auth de verdade existirem
-- [ ] `[!]` Dockerfile com versão do Go alinhada ao `go.mod`
-- [ ] `[doc]` README.md → "Pré-requisitos", "Variáveis de ambiente", "Subindo o ambiente local (Docker Compose)", "Rodando a aplicação"; ARCHITECTURE.md → "Composição (Uber Fx) e ciclo de vida", "Graceful shutdown"
+- [x] `[!]` Módulos Fx (`fx.Provide`, `fx.Invoke`) para server, workers, recursos — `cmd/croupier/providers.go` (todo o grafo de DI) + `cmd/croupier/lifecycle.go` (registro de hooks). Sem `fx.Module` dedicado — o grafo inteiro cabe num `fx.New` só, um `fx.Module` só criaria indireção sem separar nada de fato (nenhum sub-grafo é reusado em outro binário)
+- [x] `[!]` `fx.Lifecycle` com timeouts de start/shutdown observáveis — `registerBackgroundLoop` (padrão único pros 3 workers de fundo) cancela e **espera** (com timeout de `Config.ShutdownTimeout`) a goroutine parar de verdade antes do hook `OnStop` retornar; HTTP usa `http.Server.Shutdown` com o mesmo timeout. Logs de cada hook (`fx`'s own event logger, INVOKE/PROVIDE/HOOK OnStart/OnStop) — observável de fato, verificado lendo os logs de um `SIGTERM` real
+- [x] `[!]` `docker-compose.yml`: app, Postgres, LocalStack, Keycloak — serviço `app` adicionado (build do `Dockerfile`, `depends_on` com `condition: service_healthy` nos três de infra, healthcheck próprio em `/health/live`). Roda com `network_mode: host` — necessário por causa de uma armadilha real de resolução de `iss` do Keycloak em modo dev, ver ARCHITECTURE.md → "Graceful shutdown" (seção também cobre a composição)
+- [x] `[!]` `.env.example` com valores locais (sem secrets) — cresceu com `APP_PORT` + os knobs opcionais de `cmd/croupier` (intervalos de poll, backoff, `SHUTDOWN_TIMEOUT`, nomes de fila)
+- [x] `[!]` Dockerfile com versão do Go alinhada ao `go.mod` — `golang:1.26-alpine` (build multi-stage) + `alpine:3.20` (runtime, só `ca-certificates` — `CGO_ENABLED=0`)
+- [x] `[doc]` README.md → "Pré-requisitos", "Variáveis de ambiente", "Subindo o ambiente local (Docker Compose)", "Rodando a aplicação"; ARCHITECTURE.md → "Composição (Uber Fx) e ciclo de vida", "Graceful shutdown"
 
 ## Fase 11 — Observabilidade
 - [ ] `[~]` Logs JSON com correlationId, messageId, transactionId, walletId, providerId (sem credenciais/payloads financeiros completos)

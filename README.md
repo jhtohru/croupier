@@ -6,15 +6,37 @@ Serviço de processamento de carteiras (wallets) e apostas (wagering) para prove
 
 ## Pré-requisitos
 
-_(a preencher na Fase 10)_
+- Docker + Docker Compose (v2, `docker compose`) — é assim que Postgres, LocalStack, Keycloak e a própria aplicação sobem
+- Go (versão travada em [go.mod](go.mod), hoje `1.26.0`) — só necessário pra rodar testes ou `go run` fora de container
+- `python3` — usado só nos exemplos deste README pra extrair `access_token` do JSON de resposta do Keycloak (`curl | python3 -c '...'`); não é dependência do projeto em si
 
 ## Variáveis de ambiente
 
-_(a preencher na Fase 10 — ver `.env.example`)_
+Todas em [.env.example](.env.example), com valores padrão seguros pra rodar local (nenhum é segredo real). Copie pra `.env` e ajuste se quiser:
+```sh
+cp .env.example .env
+```
+`docker compose` já lê `.env` automaticamente. As variáveis cobrem Postgres, LocalStack/SQS, Keycloak e a própria aplicação (`cmd/croupier`, Fase 10) — a maioria tem default embutido no código (ver `cmd/croupier/config.go`) e só precisa ser setada se você quiser um valor diferente.
 
 ## Subindo o ambiente local (Docker Compose)
 
-_(a preencher na Fase 10)_
+```sh
+docker compose up -d --build
+```
+
+Sobe, nessa ordem de dependência (via `depends_on` com `condition: service_healthy`), Postgres, LocalStack (filas provisionadas sozinhas, ver "Inicialização das filas") e Keycloak (realm provisionado sozinho, ver "Autenticação"), e só então a própria aplicação (`app`) — que aplica as migrations automaticamente antes de aceitar tráfego (ver `cmd/croupier/migrate.go`; os comandos manuais na seção "Migrations" abaixo continuam funcionando, mas não são mais um passo obrigatório).
+
+Conferir que tudo subiu saudável:
+```sh
+docker compose ps
+```
+
+Ver logs da aplicação (inclusive o log de cada `fx.Hook` de start/stop, útil pra entender a ordem de inicialização):
+```sh
+docker compose logs -f app
+```
+
+**Nota sobre rede**: o serviço `app` roda com `network_mode: host` (ver o comentário no `docker-compose.yml`) — Keycloak em modo dev resolve o `iss` de cada token dinamicamente a partir do header `Host` da requisição, então a aplicação precisa enxergar Postgres/LocalStack/Keycloak pelos mesmos nomes (`localhost:<porta>`) que você usa nos exemplos de `curl` deste README, não pelos nomes internos da rede do compose (`postgres`, `localstack`, `keycloak`) — senão o token que você obtém via `localhost:8080` não bate com o emissor que a aplicação espera.
 
 ## Migrations
 
@@ -97,11 +119,21 @@ Rotas de wallet (`/wallets/*`) exigem um token com a role `internal-service`; ro
 
 ## Rodando a aplicação
 
-_(a preencher na Fase 10)_
+Via Docker Compose (recomendado — ver "Subindo o ambiente local" acima):
+```sh
+docker compose up -d --build app
+```
+
+Ou direto no host, com a infra (`postgres`, `localstack`, `keycloak`) já no ar via compose:
+```sh
+go run ./cmd/croupier
+```
+
+Em ambos os casos a aplicação: aplica as migrations pendentes, sobe o servidor HTTP (`APP_PORT`, padrão `8081`), e inicia os workers de fundo (consumer SQS de `wager-transactions.fifo`, resolvedor de `PENDING_REFERENCE`, publicador de outbox) — tudo isso é o `fx.App` em `cmd/croupier/main.go`, ver ARCHITECTURE.md → "Composição (Uber Fx) e ciclo de vida". `Ctrl+C` (ou `docker compose stop app`) dispara shutdown gracioso: para de aceitar conexão nova, dá um tempo (`SHUTDOWN_TIMEOUT`, padrão 15s) pro que já estava em andamento terminar, então encerra.
 
 ## Exemplos de chamadas
 
-A aplicação em si (`cmd/croupier`) ainda não existe (Fase 10) — os exemplos abaixo assumem um `*httpapi.Server` (ver `internal/httpapi`) servindo em `localhost:8080`, o que hoje só acontece dentro dos testes de integração (`internal/httpapi/integration_test.go`). Todas as rotas abaixo exigem um token — ver "Autenticação (IdP / Keycloak)" acima pra obter um.
+Os exemplos abaixo assumem a aplicação rodando em `localhost:8081` (padrão de `APP_PORT`, ver seção acima). Todas as rotas exigem um token — ver "Autenticação (IdP / Keycloak)" acima pra obter um.
 
 ```sh
 INTERNAL_TOKEN=$(curl -s -X POST http://localhost:8080/realms/croupier/protocol/openid-connect/token \
@@ -165,9 +197,10 @@ go test -race ./...
 go vet ./...
 ```
 
-Testes de integração de `internal/postgres` (`//go:build integration`) exigem Postgres real com as migrations aplicadas — ver "Migrations" acima:
+Testes de integração de `internal/postgres` (`//go:build integration`) exigem Postgres real com as migrations aplicadas — ver "Migrations" acima. **Rode com o serviço `app` parado** (`docker compose stop app`): o `OutboxWorker` dele compete de verdade pela tabela `outbox` com os testes de concorrência do outbox (`TestOutboxRepositoryFindDueForUpdateSkipsLockedRows`), que assumem acesso exclusivo à tabela pra fazer afirmação sobre quem reivindicou qual linha — não é um bug do `SELECT ... FOR UPDATE SKIP LOCKED` (que continua correto com ou sem o `app` rodando), é o teste que não tem como afirmar nada específico sobre concorrência de duas goroutines se existe uma terceira reivindicando linhas ao mesmo tempo:
 ```sh
 docker compose up -d postgres
+docker compose stop app 2>/dev/null # se estiver rodando
 # aplicar as migrations (comandos na seção "Migrations")
 TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
   go test -tags integration -race -count=1 ./internal/postgres/...

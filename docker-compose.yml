@@ -53,6 +53,46 @@ services:
       timeout: 5s
       retries: 15
 
+  app:
+    build:
+      context: .
+    restart: unless-stopped
+    # Keycloak's start-dev mode resolves each token's `iss` claim dynamically
+    # from the request's own Host header (no KC_HOSTNAME pin) — that's what
+    # lets the same realm serve both host-side curl (localhost:8080, per
+    # README) and a client on the compose network without extra config. If
+    # app reached Keycloak via the internal DNS name "keycloak" instead, its
+    # own tokens would carry a different issuer than the ones anyone obtains
+    # via localhost:8080, and internal/auth.Verifier would reject every one
+    # of them (issuer mismatch). host networking sidesteps the whole problem:
+    # "localhost" inside this container is the same "localhost" everything
+    # else (Postgres, LocalStack, Keycloak, curl) already uses — this is
+    # exactly the configuration already verified working via `go run
+    # ./cmd/croupier` directly on the host, just containerized.
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      APP_PORT: ${APP_PORT:-8081}
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-croupier}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-croupier}
+      POSTGRES_DB: ${POSTGRES_DB:-croupier}
+      SQS_ENDPOINT: http://localhost:${LOCALSTACK_PORT:-4566}
+      AWS_REGION: us-east-1
+      KEYCLOAK_ISSUER_URL: http://localhost:${KEYCLOAK_PORT:-8080}/realms/croupier
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:${APP_PORT:-8081}/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   postgres_data:
   localstack_data:

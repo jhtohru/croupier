@@ -93,15 +93,22 @@ func TestVerifierAgainstRealKeycloak(t *testing.T) {
 		assert.ErrorIs(t, err, auth.ErrInvalidToken)
 	})
 
-	t.Run("tampered signature is rejected", func(t *testing.T) {
+	t.Run("tampered payload is rejected", func(t *testing.T) {
 		token := fetchToken(t, "provider-a", "provider-a-secret")
 		parts := strings.Split(token, ".")
 		require.Len(t, parts, 3)
-		// Flip the last character of the signature — same header/payload,
-		// broken signature.
-		sig := []byte(parts[2])
-		sig[len(sig)-1] = flipChar(sig[len(sig)-1])
-		tampered := parts[0] + "." + parts[1] + "." + string(sig)
+		// Flip the payload's first character rather than the signature's
+		// last one: base64url's final quantum can have unused padding bits,
+		// and a single-character change landing there can decode to the
+		// exact same bytes — observed directly, flipping the signature's
+		// last character passed verification intermittently because of
+		// this. A change anywhere but the last one or two characters of a
+		// base64url segment always changes the decoded bytes, and
+		// corrupting the payload invalidates the signature deterministically
+		// regardless of where in the payload it lands.
+		payload := []byte(parts[1])
+		payload[0] = flipChar(payload[0])
+		tampered := parts[0] + "." + string(payload) + "." + parts[2]
 
 		_, err := verifier.Verify(context.Background(), tampered)
 		assert.ErrorIs(t, err, auth.ErrInvalidToken)
