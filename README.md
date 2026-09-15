@@ -73,7 +73,27 @@ docker exec <container-do-localstack> awslocal sqs list-queues
 
 ## Autenticação (IdP / Keycloak)
 
-_(a preencher na Fase 9 — provisionamento automático, identidades de teste, fluxo autenticado de exemplo)_
+Automática — não precisa configurar nada manualmente no admin console. Suba o Keycloak:
+```sh
+docker compose up -d keycloak
+```
+
+`deploy/keycloak/realm-export.json` é importado sozinho no start do container (`--import-realm`) e provisiona o realm `croupier` com três identidades de teste (`client_credentials`, service-to-service — sem fluxo de usuário/senha):
+
+| Client            | Secret                     | Papel                                                              |
+|-------------------|----------------------------|---------------------------------------------------------------------|
+| `provider-a`      | `provider-a-secret`        | Provider — token carrega `providerId: "provider-a"`                |
+| `provider-b`      | `provider-b-secret`        | Provider — token carrega `providerId: "provider-b"`                 |
+| `internal-service`| `internal-service-secret`  | Uso interno — token carrega a role de realm `internal-service`      |
+
+Obter um token (válido por 5 minutos):
+```sh
+curl -s -X POST http://localhost:8080/realms/croupier/protocol/openid-connect/token \
+  -d 'grant_type=client_credentials' -d 'client_id=provider-a' -d 'client_secret=provider-a-secret' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])'
+```
+
+Rotas de wallet (`/wallets/*`) exigem um token com a role `internal-service`; rotas de wagering exigem qualquer token válido, com `providerId` extraído do token (nunca de corpo/path informado pelo cliente) — ver ARCHITECTURE.md → "Autenticação e Autorização".
 
 ## Rodando a aplicação
 
@@ -81,43 +101,52 @@ _(a preencher na Fase 10)_
 
 ## Exemplos de chamadas
 
-A aplicação em si (`cmd/croupier`) ainda não existe (Fase 10) — os exemplos abaixo assumem um `*httpapi.Server` (ver `internal/httpapi`) servindo em `localhost:8080`, o que hoje só acontece dentro dos testes de integração (`internal/httpapi/integration_test.go`). Sem autenticação ainda (Fase 9): `providerId` nas rotas de wagering vem direto do corpo/path informado, não de uma identidade verificada.
+A aplicação em si (`cmd/croupier`) ainda não existe (Fase 10) — os exemplos abaixo assumem um `*httpapi.Server` (ver `internal/httpapi`) servindo em `localhost:8080`, o que hoje só acontece dentro dos testes de integração (`internal/httpapi/integration_test.go`). Todas as rotas abaixo exigem um token — ver "Autenticação (IdP / Keycloak)" acima pra obter um.
 
-Criar uma wallet com saldo inicial:
+```sh
+INTERNAL_TOKEN=$(curl -s -X POST http://localhost:8080/realms/croupier/protocol/openid-connect/token \
+  -d 'grant_type=client_credentials' -d 'client_id=internal-service' -d 'client_secret=internal-service-secret' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+PROVIDER_TOKEN=$(curl -s -X POST http://localhost:8080/realms/croupier/protocol/openid-connect/token \
+  -d 'grant_type=client_credentials' -d 'client_id=provider-a' -d 'client_secret=provider-a-secret' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+```
+
+Criar uma wallet com saldo inicial (rota de wallet — exige `$INTERNAL_TOKEN`):
 ```sh
 curl -s -X POST localhost:8080/wallets \
-  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $INTERNAL_TOKEN" -H 'Content-Type: application/json' \
   -d '{"playerId":"11111111-1111-1111-1111-111111111111","initialBalance":{"amount":"100.00","currency":"BRL"}}'
 ```
 
 Consultar uma wallet:
 ```sh
-curl -s localhost:8080/wallets/<walletId>
+curl -s localhost:8080/wallets/<walletId> -H "Authorization: Bearer $INTERNAL_TOKEN"
 ```
 
-Submeter uma aposta (o header `Idempotency-Key`, quando enviado, precisa bater com `providerId:externalTransactionId` do corpo — ver TODO.md, Fase 5):
+Submeter uma aposta (rota de wagering — exige `$PROVIDER_TOKEN`; `providerId` vem do token, não vai no corpo. O header `Idempotency-Key`, quando enviado, precisa bater com `providerId:externalTransactionId` — ver TODO.md, Fase 5):
 ```sh
 curl -s -X POST localhost:8080/wagering/transactions \
-  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: provider-a:ext-1' \
   -d '{
-    "providerId": "provider-a", "externalTransactionId": "ext-1",
+    "externalTransactionId": "ext-1",
     "playerId": "11111111-1111-1111-1111-111111111111", "walletId": "<walletId>",
     "roundId": "round-1", "gameId": "game-1",
     "kind": "BET", "amount": {"amount":"30.00","currency":"BRL"}
   }'
 ```
 
-Consultar uma transação por id interno ou por `(providerId, externalTransactionId)`:
+Consultar uma transação por id interno (só `$INTERNAL_TOKEN`) ou por `(providerId, externalTransactionId)` (o provider só acessa as próprias — path `providerId` precisa bater com o do token, exceto pra `$INTERNAL_TOKEN`, que acessa qualquer uma):
 ```sh
-curl -s localhost:8080/wagering/transactions/<transactionId>
-curl -s localhost:8080/providers/provider-a/wagering/transactions/ext-1
+curl -s localhost:8080/wagering/transactions/<transactionId> -H "Authorization: Bearer $INTERNAL_TOKEN"
+curl -s localhost:8080/providers/provider-a/wagering/transactions/ext-1 -H "Authorization: Bearer $PROVIDER_TOKEN"
 ```
 
-Ledger paginado por cursor e reconciliação:
+Ledger paginado por cursor e reconciliação (rotas de wallet — `$INTERNAL_TOKEN`):
 ```sh
-curl -s "localhost:8080/wallets/<walletId>/ledger?limit=20"
-curl -s -X POST localhost:8080/wallets/<walletId>/reconciliation
+curl -s "localhost:8080/wallets/<walletId>/ledger?limit=20" -H "Authorization: Bearer $INTERNAL_TOKEN"
+curl -s -X POST localhost:8080/wallets/<walletId>/reconciliation -H "Authorization: Bearer $INTERNAL_TOKEN"
 ```
 
 Healthchecks:
@@ -136,12 +165,12 @@ go test -race ./...
 go vet ./...
 ```
 
-Testes de integração de `internal/postgres` e `internal/httpapi` (`//go:build integration`) exigem Postgres real com as migrations aplicadas — ver "Migrations" acima:
+Testes de integração de `internal/postgres` (`//go:build integration`) exigem Postgres real com as migrations aplicadas — ver "Migrations" acima:
 ```sh
 docker compose up -d postgres
 # aplicar as migrations (comandos na seção "Migrations")
 TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
-  go test -tags integration -race -count=1 ./internal/postgres/... ./internal/httpapi/...
+  go test -tags integration -race -count=1 ./internal/postgres/...
 ```
 
 Testes de integração de `internal/sqs` exigem Postgres **e** LocalStack (as filas são provisionadas sozinhas — ver "Inicialização das filas" acima):
@@ -150,4 +179,12 @@ docker compose up -d postgres localstack
 TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
 SQS_ENDPOINT="http://localhost:4566" \
   go test -tags integration -race -count=1 ./internal/sqs/...
+```
+
+Testes de integração de `internal/auth` exigem Keycloak real (realm provisionado sozinho — ver "Autenticação" acima); `internal/httpapi` exige Postgres **e** Keycloak juntos, já que o fluxo completo passa pelos dois:
+```sh
+docker compose up -d postgres keycloak
+TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
+KEYCLOAK_ISSUER_URL="http://localhost:8080/realms/croupier" \
+  go test -tags integration -race -count=1 ./internal/auth/... ./internal/httpapi/...
 ```

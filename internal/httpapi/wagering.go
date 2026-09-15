@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jhtohru/croupier/internal/app"
+	"github.com/jhtohru/croupier/internal/auth"
 	"github.com/jhtohru/croupier/internal/money"
 	"github.com/jhtohru/croupier/internal/wager"
 )
@@ -49,8 +50,12 @@ func newWagerTransactionResponse(tx *wager.Transaction) wagerTransactionResponse
 	}
 }
 
+// submitWagerTransactionRequest has no providerId field — it comes from the
+// caller's own verified token (see requireAuth/claimsFromContext), never
+// from something the client writes into its own request body. A provider
+// asserting someone else's providerId in a body field is exactly the kind
+// of cross-provider leak Fase 9 exists to close.
 type submitWagerTransactionRequest struct {
-	ProviderID                     string      `json:"providerId"`
 	ExternalTransactionID          string      `json:"externalTransactionId"`
 	PlayerID                       uuid.UUID   `json:"playerId"`
 	WalletID                       uuid.UUID   `json:"walletId"`
@@ -71,29 +76,32 @@ type submitWagerTransactionResponse struct {
 // submitted wagering events (Fase 8's SQS consumer feeds the same
 // app.WagerSubmitter.Submit with the same input struct, so both paths carry
 // identical idempotency/business-rule guarantees per ARCHITECTURE.md).
+// providerId is the authenticated caller's own, from requireAuth — see the
+// note on submitWagerTransactionRequest.
 //
 // The Idempotency-Key header, when present, is cross-checked against
-// providerId:externalTransactionId from the body — this is a client-facing
-// consistency check, not the idempotency mechanism itself (Submit already
-// derives its own key from those two body fields regardless of any header;
-// see the Fase 5 note in TODO.md). The header is optional: its absence
-// doesn't weaken idempotency, only loses this extra check.
+// providerId:externalTransactionId — this is a client-facing consistency
+// check, not the idempotency mechanism itself (Submit already derives its
+// own key regardless of any header; see the Fase 5 note in TODO.md). The
+// header is optional: its absence doesn't weaken idempotency, only loses
+// this extra check.
 func (h *handler) submitWagerTransaction(w http.ResponseWriter, r *http.Request) {
 	var req submitWagerTransactionRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "malformed request body"})
 		return
 	}
+	providerID := claimsFromContext(r.Context()).ProviderID
 
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
-		if want := req.ProviderID + ":" + req.ExternalTransactionID; key != want {
+		if want := providerID + ":" + req.ExternalTransactionID; key != want {
 			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "Idempotency-Key does not match providerId:externalTransactionId"})
 			return
 		}
 	}
 
 	result, err := h.deps.WagerSubmitter.Submit(r.Context(), app.SubmitWagerTransactionInput{
-		ProviderID:                     req.ProviderID,
+		ProviderID:                     providerID,
 		ExternalTransactionID:          req.ExternalTransactionID,
 		PlayerID:                       req.PlayerID,
 		WalletID:                       req.WalletID,
@@ -132,17 +140,23 @@ func (h *handler) getWagerTransaction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newWagerTransactionResponse(tx))
 }
 
-// getWagerTransactionByProvider is the provider-facing lookup route.
-// providerId comes straight from the URL, not from an authenticated identity
-// — see the limitation noted on Server.NewServer and in ARCHITECTURE.md.
-// Fase 9's auth middleware must set providerId here from the caller's own
-// verified identity before this route can be trusted to isolate providers
-// from each other.
+// getWagerTransactionByProvider is the provider-facing lookup route. The
+// actual cross-provider isolation happens here: a provider may only look up
+// its own transactions (path providerId must match the caller's own,
+// verified providerId claim), never another provider's by guessing/trying
+// their id in the URL. internal-service callers are exempt — that's a
+// deliberate operational escape hatch, not a hole, since internal-service
+// tokens are never issued to providers (see deploy/keycloak/realm-export.json).
 func (h *handler) getWagerTransactionByProvider(w http.ResponseWriter, r *http.Request) {
 	providerID := r.PathValue("providerId")
 	externalTransactionID := r.PathValue("externalTransactionId")
 	if strings.TrimSpace(providerID) == "" || strings.TrimSpace(externalTransactionID) == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "providerId and externalTransactionId are required"})
+		return
+	}
+	claims := claimsFromContext(r.Context())
+	if !claims.HasRole(auth.InternalServiceRole) && claims.ProviderID != providerID {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "cannot access another provider's transactions"})
 		return
 	}
 	tx, err := h.deps.WagerTransactionGetter.GetByProvider(r.Context(), providerID, externalTransactionID)

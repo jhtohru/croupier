@@ -30,6 +30,12 @@ func mustWallet(t *testing.T, playerID uuid.UUID, balance money.Money) *wallet.W
 	return w
 }
 
+// testBearerToken is an arbitrary opaque string — stubTokenVerifier never
+// inspects it, only returns whichever claims/err it was built with. Real
+// token validation is internal/auth.Verifier's own test suite, run against
+// a real Keycloak.
+const testBearerToken = "test-token"
+
 func doRequest(t *testing.T, srv *Server, method, target string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var r *http.Request
@@ -40,6 +46,7 @@ func doRequest(t *testing.T, srv *Server, method, target string, body any) *http
 	} else {
 		r = httptest.NewRequest(method, target, nil)
 	}
+	r.Header.Set("Authorization", "Bearer "+testBearerToken)
 	return recordRequest(srv, r)
 }
 
@@ -50,6 +57,7 @@ func newJSONRequest(t *testing.T, method, target string, body []byte) *http.Requ
 	t.Helper()
 	r := httptest.NewRequest(method, target, strings.NewReader(string(body)))
 	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer "+testBearerToken)
 	return r
 }
 
@@ -63,7 +71,7 @@ func TestCreateWallet(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		playerID := uuid.New()
 		w := mustWallet(t, playerID, mustMoney(t, "100.00"))
-		srv := NewServer(Deps{WalletCreator: stubWalletCreator{wallet: w}})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletCreator: stubWalletCreator{wallet: w}})
 
 		rec := doRequest(t, srv, http.MethodPost, "/wallets", createWalletRequest{
 			PlayerID:       playerID,
@@ -78,7 +86,7 @@ func TestCreateWallet(t *testing.T) {
 	})
 
 	t.Run("missing playerId", func(t *testing.T) {
-		srv := NewServer(Deps{WalletCreator: stubWalletCreator{}})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletCreator: stubWalletCreator{}})
 		rec := doRequest(t, srv, http.MethodPost, "/wallets", createWalletRequest{
 			InitialBalance: mustMoney(t, "0.00"),
 		})
@@ -86,15 +94,16 @@ func TestCreateWallet(t *testing.T) {
 	})
 
 	t.Run("malformed body", func(t *testing.T) {
-		srv := NewServer(Deps{WalletCreator: stubWalletCreator{}})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletCreator: stubWalletCreator{}})
 		r := httptest.NewRequest(http.MethodPost, "/wallets", strings.NewReader(`{"playerId": not-json}`))
+		r.Header.Set("Authorization", "Bearer "+testBearerToken)
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, r)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("already exists maps to 409", func(t *testing.T) {
-		srv := NewServer(Deps{WalletCreator: stubWalletCreator{err: app.ErrWalletAlreadyExists}})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletCreator: stubWalletCreator{err: app.ErrWalletAlreadyExists}})
 		rec := doRequest(t, srv, http.MethodPost, "/wallets", createWalletRequest{
 			PlayerID:       uuid.New(),
 			InitialBalance: mustMoney(t, "0.00"),
@@ -103,7 +112,7 @@ func TestCreateWallet(t *testing.T) {
 	})
 
 	t.Run("negative initial balance maps to 400", func(t *testing.T) {
-		srv := NewServer(Deps{WalletCreator: stubWalletCreator{err: wallet.ErrNegativeInitialBalance}})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletCreator: stubWalletCreator{err: wallet.ErrNegativeInitialBalance}})
 		rec := doRequest(t, srv, http.MethodPost, "/wallets", createWalletRequest{
 			PlayerID:       uuid.New(),
 			InitialBalance: mustMoney(t, "0.00"),
@@ -115,7 +124,7 @@ func TestCreateWallet(t *testing.T) {
 func TestGetWallet(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		w := mustWallet(t, uuid.New(), mustMoney(t, "50.00"))
-		srv := NewServer(Deps{WalletGetter: stubWalletGetter{wallet: w}})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletGetter: stubWalletGetter{wallet: w}})
 
 		rec := doRequest(t, srv, http.MethodGet, "/wallets/"+w.ID().String(), nil)
 
@@ -127,13 +136,13 @@ func TestGetWallet(t *testing.T) {
 	})
 
 	t.Run("not found maps to 404", func(t *testing.T) {
-		srv := NewServer(Deps{WalletGetter: stubWalletGetter{err: app.ErrWalletNotFound}})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletGetter: stubWalletGetter{err: app.ErrWalletNotFound}})
 		rec := doRequest(t, srv, http.MethodGet, "/wallets/"+uuid.New().String(), nil)
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
 	t.Run("invalid walletId maps to 400", func(t *testing.T) {
-		srv := NewServer(Deps{WalletGetter: stubWalletGetter{}})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletGetter: stubWalletGetter{}})
 		rec := doRequest(t, srv, http.MethodGet, "/wallets/not-a-uuid", nil)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
@@ -149,7 +158,7 @@ func TestReconcileWallet(t *testing.T) {
 		Consistent:        true,
 		EntriesChecked:    2,
 	}
-	srv := NewServer(Deps{WalletReconciler: stubWalletReconciler{result: result}})
+	srv := NewServer(Deps{Auth: internalAuth(), WalletReconciler: stubWalletReconciler{result: result}})
 
 	rec := doRequest(t, srv, http.MethodPost, "/wallets/"+walletID.String()+"/reconciliation", nil)
 
@@ -174,7 +183,7 @@ func TestListWalletLedger(t *testing.T) {
 
 	t.Run("default pagination", func(t *testing.T) {
 		lister := &stubWalletLedgerLister{entries: []*wallet.LedgerEntry{entry}}
-		srv := NewServer(Deps{WalletLedgerLister: lister})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletLedgerLister: lister})
 
 		rec := doRequest(t, srv, http.MethodGet, "/wallets/"+walletID.String()+"/ledger", nil)
 
@@ -190,7 +199,7 @@ func TestListWalletLedger(t *testing.T) {
 	t.Run("cursor and limit forwarded", func(t *testing.T) {
 		cursor := uuid.New()
 		lister := &stubWalletLedgerLister{}
-		srv := NewServer(Deps{WalletLedgerLister: lister})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletLedgerLister: lister})
 
 		rec := doRequest(t, srv, http.MethodGet, "/wallets/"+walletID.String()+"/ledger?cursor="+cursor.String()+"&limit=10", nil)
 
@@ -202,14 +211,14 @@ func TestListWalletLedger(t *testing.T) {
 
 	t.Run("invalid cursor maps to 400", func(t *testing.T) {
 		lister := &stubWalletLedgerLister{}
-		srv := NewServer(Deps{WalletLedgerLister: lister})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletLedgerLister: lister})
 		rec := doRequest(t, srv, http.MethodGet, "/wallets/"+walletID.String()+"/ledger?cursor=not-a-uuid", nil)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("invalid limit maps to 400", func(t *testing.T) {
 		lister := &stubWalletLedgerLister{}
-		srv := NewServer(Deps{WalletLedgerLister: lister})
+		srv := NewServer(Deps{Auth: internalAuth(), WalletLedgerLister: lister})
 		rec := doRequest(t, srv, http.MethodGet, "/wallets/"+walletID.String()+"/ledger?limit=-1", nil)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})

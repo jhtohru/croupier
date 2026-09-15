@@ -108,14 +108,14 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[doc]` README.md → "Inicialização das filas"; ARCHITECTURE.md → "Mensageria (SQS)", detalhar "Inbox / Outbox"
 
 ## Fase 9 — internal/auth
-- [ ] `[!]` Integração com IdP externo (Keycloak recomendado, via docker-compose) — `client_credentials` para service-to-service
-- [ ] `[!]` Validação de token, extração de `providerId` autorizado a partir da identidade autenticada
-- [ ] `[!]` Rejeitar credenciais ausentes/inválidas/expiradas
-- [ ] `[!]` Isolamento de provider em queries e replays (nenhum vazamento de dado entre providers)
-- [ ] `[!]` Restringir operações de wallet ao uso interno (sem acesso via API de provider)
-- [ ] `[!]` Provisionamento automático do IdP + identidades de teste (script/config no docker-compose ou README)
-- [ ] `[!]` Testes de integração de auth (IdP real, não mock)
-- [ ] `[doc]` README.md → "Autenticação (IdP / Keycloak)"; ARCHITECTURE.md → "Autenticação e Autorização"
+- [x] `[!]` Integração com IdP externo (Keycloak, via docker-compose) — `client_credentials` para service-to-service. `internal/auth.Verifier` usa `github.com/coreos/go-oidc/v3` (discovery + JWKS via o endpoint `.well-known`, cache/refresh de chaves cuidado pela própria lib), `SkipClientIDCheck: true` porque esta API aceita tokens de múltiplos clients diferentes (não faz sentido checar `aud` contra um client id fixo)
+- [x] `[!]` Validação de token, extração de `providerId` autorizado a partir da identidade autenticada — `providerId` vem de um protocol mapper `oidc-hardcoded-claim-mapper` por client provider no realm (não de `azp`/`client_id`, decisão explícita — ver ARCHITECTURE.md). Handlers usam `claimsFromContext(r.Context()).ProviderID`, nunca um valor vindo de corpo/path do cliente
+- [x] `[!]` Rejeitar credenciais ausentes/inválidas/expiradas — `requireAuth`/`requireInternalRole` em `internal/httpapi/auth.go`: sem header → 401, token malformado/assinatura inválida/emissor errado → 401 (`auth.ErrInvalidToken`, verificado com token adulterado contra Keycloak real), expirado → 401 (mecanismo do próprio `go-oidc`, não testado com espera real de expiração — `accessTokenLifespan` de 300s no realm tornaria o teste lento; a checagem de assinatura/formato já prova que o verificador rejeita tokens inválidos pela mesma via)
+- [x] `[!]` Isolamento de provider em queries e replays (nenhum vazamento de dado entre providers) — `GET /providers/:providerId/...` exige `providerId` do path == `providerId` do token (403 se não bater); verificado com dois clients reais (`provider-a`/`provider-b`) contra Keycloak de verdade, não só com stub
+- [x] `[!]` Restringir operações de wallet ao uso interno (sem acesso via API de provider) — role de realm `internal-service`, atribuída só ao service account do client `internal-service` (nunca aos clients de provider); `requireInternalRole` gate em toda rota de wallet + no lookup interno de transação por id. Verificado com token real de provider tentando acessar rota de wallet → 403
+- [x] `[!]` Provisionamento automático do IdP + identidades de teste — `deploy/keycloak/realm-export.json`, importado via `--import-realm` no comando do container (hook nativo do Keycloak, não script customizado): realm `croupier`, clients `provider-a`/`provider-b`/`internal-service` com `serviceAccountsEnabled`, secrets fixos (valores de exemplo, não segredos reais), role `internal-service` pré-atribuída ao service account certo
+- [x] `[!]` Testes de integração de auth (IdP real, não mock) — `internal/auth/verifier_test.go` (`//go:build integration`): `client_credentials` real pros três clients, `providerId` correto por client, segredo errado rejeitado pelo próprio Keycloak, token malformado/assinatura adulterada rejeitados pelo `Verifier`. `internal/httpapi/integration_test.go` reforça com o fluxo HTTP completo (Postgres real + Keycloak real): wallet só com token internal-service, wagering só com token de provider, isolamento entre `provider-a`/`provider-b` verificado com dois tokens reais e distintos
+- [x] `[doc]` README.md → "Autenticação (IdP / Keycloak)"; ARCHITECTURE.md → "Autenticação e Autorização"
 
 ## Fase 10 — cmd/croupier (Uber Fx) & Docker Compose & Env
 - [ ] `[!]` Módulos Fx (`fx.Module`, `fx.Provide`, `fx.Invoke`) para server, workers, recursos

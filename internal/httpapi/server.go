@@ -56,30 +56,35 @@ type Deps struct {
 	// now — Fase 8 will extend whatever cmd/croupier passes in here to also
 	// check SQS, with no change needed in this package.
 	Ready func(ctx context.Context) error
+	// Auth verifies bearer tokens (internal/auth.Verifier satisfies this).
+	// Every route except /health/* requires one — see requireAuth and
+	// requireInternalRole below.
+	Auth tokenVerifier
 }
 
 type Server struct {
 	mux *http.ServeMux
 }
 
-// NewServer builds the routes listed in TODO.md's Fase 7. Auth middleware
-// (Fase 9) isn't wired in yet: providerId on the wagering routes is taken
-// directly from client-supplied path/body, not from an authenticated
-// identity — see the "Autenticação e Autorização" limitation noted in
-// ARCHITECTURE.md. That's the one seam Fase 9 needs to close; nothing else
-// here should need to change when it does.
+// NewServer builds the routes listed in TODO.md's Fase 7, gated per
+// TODO.md's Fase 9: wallet operations require the internal-service role
+// (requireInternalRole — not exposed to providers at all, regardless of how
+// valid their own token is); wagering routes require any authenticated
+// caller (requireAuth), with providerId coming from the token's own claims,
+// never from client-supplied path/body — see wagering.go. Only /health/*
+// stays open, since orchestration health checks can't present a token.
 func NewServer(deps Deps) *Server {
 	h := &handler{deps: deps}
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /wallets", h.createWallet)
-	mux.HandleFunc("GET /wallets/{walletId}", h.getWallet)
-	mux.HandleFunc("GET /wallets/{walletId}/ledger", h.listWalletLedger)
-	mux.HandleFunc("POST /wallets/{walletId}/reconciliation", h.reconcileWallet)
+	mux.HandleFunc("POST /wallets", requireInternalRole(deps.Auth, h.createWallet))
+	mux.HandleFunc("GET /wallets/{walletId}", requireInternalRole(deps.Auth, h.getWallet))
+	mux.HandleFunc("GET /wallets/{walletId}/ledger", requireInternalRole(deps.Auth, h.listWalletLedger))
+	mux.HandleFunc("POST /wallets/{walletId}/reconciliation", requireInternalRole(deps.Auth, h.reconcileWallet))
 
-	mux.HandleFunc("POST /wagering/transactions", h.submitWagerTransaction)
-	mux.HandleFunc("GET /wagering/transactions/{transactionId}", h.getWagerTransaction)
-	mux.HandleFunc("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", h.getWagerTransactionByProvider)
+	mux.HandleFunc("POST /wagering/transactions", requireAuth(deps.Auth, h.submitWagerTransaction))
+	mux.HandleFunc("GET /wagering/transactions/{transactionId}", requireInternalRole(deps.Auth, h.getWagerTransaction))
+	mux.HandleFunc("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", requireAuth(deps.Auth, h.getWagerTransactionByProvider))
 
 	mux.HandleFunc("GET /health/live", h.healthLive)
 	mux.HandleFunc("GET /health/ready", h.healthReady)

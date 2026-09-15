@@ -25,8 +25,10 @@ func (g *WagerTransactionGetter) Get(ctx context.Context, id uuid.UUID) (*wager.
 
 // GetByProvider looks a transaction up by (providerId, externalTransactionId)
 // — the provider-facing route. Isolation is structural: the lookup is always
-// scoped to the providerID passed in, which callers (Fase 7/9) must set to
-// the authenticated identity's own providerId, never a client-supplied one.
+// scoped to the providerID passed in, which internal/httpapi sets from the
+// caller's authenticated providerId claim (Fase 9), never a client-supplied
+// path/body value — see internal/httpapi/wagering.go's
+// getWagerTransactionByProvider.
 func (g *WagerTransactionGetter) GetByProvider(ctx context.Context, providerID, externalTransactionID string) (*wager.Transaction, error) {
 	return g.wagers.FindByProviderAndExternalID(ctx, providerID, externalTransactionID)
 }

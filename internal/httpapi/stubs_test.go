@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jhtohru/croupier/internal/app"
+	"github.com/jhtohru/croupier/internal/auth"
 	"github.com/jhtohru/croupier/internal/wager"
 	"github.com/jhtohru/croupier/internal/wallet"
 )
@@ -79,4 +80,25 @@ func (s stubWagerTransactionGetter) Get(ctx context.Context, id uuid.UUID) (*wag
 
 func (s stubWagerTransactionGetter) GetByProvider(ctx context.Context, providerID, externalTransactionID string) (*wager.Transaction, error) {
 	return s.tx, s.err
+}
+
+// stubTokenVerifier ignores the raw token string entirely and just returns
+// whatever claims/err it was built with — the real signature/issuer/expiry
+// checking belongs to internal/auth.Verifier's own test suite (against a
+// real Keycloak), not this package's.
+type stubTokenVerifier struct {
+	claims auth.Claims
+	err    error
+}
+
+func (s stubTokenVerifier) Verify(ctx context.Context, rawToken string) (auth.Claims, error) {
+	return s.claims, s.err
+}
+
+func internalAuth() stubTokenVerifier {
+	return stubTokenVerifier{claims: auth.Claims{Roles: []string{auth.InternalServiceRole}}}
+}
+
+func providerAuth(providerID string) stubTokenVerifier {
+	return stubTokenVerifier{claims: auth.Claims{ProviderID: providerID}}
 }
