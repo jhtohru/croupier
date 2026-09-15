@@ -68,7 +68,50 @@ _(a preencher na Fase 10)_
 
 ## Exemplos de chamadas
 
-_(a preencher na Fase 7)_
+A aplicação em si (`cmd/croupier`) ainda não existe (Fase 10) — os exemplos abaixo assumem um `*httpapi.Server` (ver `internal/httpapi`) servindo em `localhost:8080`, o que hoje só acontece dentro dos testes de integração (`internal/httpapi/integration_test.go`). Sem autenticação ainda (Fase 9): `providerId` nas rotas de wagering vem direto do corpo/path informado, não de uma identidade verificada.
+
+Criar uma wallet com saldo inicial:
+```sh
+curl -s -X POST localhost:8080/wallets \
+  -H 'Content-Type: application/json' \
+  -d '{"playerId":"11111111-1111-1111-1111-111111111111","initialBalance":{"amount":"100.00","currency":"BRL"}}'
+```
+
+Consultar uma wallet:
+```sh
+curl -s localhost:8080/wallets/<walletId>
+```
+
+Submeter uma aposta (o header `Idempotency-Key`, quando enviado, precisa bater com `providerId:externalTransactionId` do corpo — ver TODO.md, Fase 5):
+```sh
+curl -s -X POST localhost:8080/wagering/transactions \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: provider-a:ext-1' \
+  -d '{
+    "providerId": "provider-a", "externalTransactionId": "ext-1",
+    "playerId": "11111111-1111-1111-1111-111111111111", "walletId": "<walletId>",
+    "roundId": "round-1", "gameId": "game-1",
+    "kind": "BET", "amount": {"amount":"30.00","currency":"BRL"}
+  }'
+```
+
+Consultar uma transação por id interno ou por `(providerId, externalTransactionId)`:
+```sh
+curl -s localhost:8080/wagering/transactions/<transactionId>
+curl -s localhost:8080/providers/provider-a/wagering/transactions/ext-1
+```
+
+Ledger paginado por cursor e reconciliação:
+```sh
+curl -s "localhost:8080/wallets/<walletId>/ledger?limit=20"
+curl -s -X POST localhost:8080/wallets/<walletId>/reconciliation
+```
+
+Healthchecks:
+```sh
+curl -s localhost:8080/health/live
+curl -s localhost:8080/health/ready   # 503 se Postgres estiver inacessível
+```
 
 ## Rodando os testes
 

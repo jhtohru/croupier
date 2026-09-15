@@ -158,6 +158,25 @@ Migrations em `internal/postgres/migrations`, uma tabela por migration, geridas 
 
 **Migrations `000006`/`000007`, adicionadas depois, na revisão**: `000006` adiciona um índice em `wallet_ledger_entries.transaction_id` (o único índice existente ali é liderado por `wallet_id`, então não serve pra `FindLedgerEntryByTransactionID`, que filtra só por `transaction_id` — usado em todo replay idempotente). `000007` adiciona `pending_reference_attempts`/`pending_reference_next_retry_at` em `wager_transactions`, metadado operacional do `PendingReferenceResolver` (ver "Referências pendentes"), não invariante de domínio. Migrations já aplicadas nunca são editadas — regra seguida à risca aqui: mesmo sendo mudanças pequenas na mesma tabela de uma migration anterior, cada uma virou um arquivo novo.
 
+## API HTTP (internal/httpapi)
+
+**Roteamento**: `net/http` puro — `ServeMux` do Go 1.22+ já resolve método+path com wildcards (`"POST /wallets/{walletId}/reconciliation"`, `r.PathValue("walletId")`), sem justificar um framework de roteamento como dependência nova. Mesmo raciocínio já aplicado em `internal/postgres`: SQL/stdlib explícito em vez de abstração de terceiros quando a stdlib já resolve.
+
+**Interfaces definidas pelo consumidor**: `Deps` (em `server.go`) não recebe `*app.WalletCreator` etc. diretamente — recebe interfaces locais e não-exportadas (`walletCreator`, `wagerSubmitter`, ...) com só o método que cada handler de fato chama. Cada tipo concreto de `internal/app` já satisfaz a interface correspondente sem nenhuma mudança do lado de `app` — é só um ponto de acoplamento a menos. Isso é o que permite testar cada handler com um *stub* de uma linha (`internal/httpapi/stubs_test.go`), sem precisar de repositório fake nem Postgres real, testando só forma de JSON/status HTTP/mapeamento de erro — a lógica de caso de uso já tem sua própria suíte em `internal/app`.
+
+**Mapeamento de erro → status** (`errors.go`): três categorias explícitas, tudo mais vira `500` genérico com o erro de verdade só logado no servidor, nunca devolvido ao cliente — mesmo raciocínio de não vazar detalhe interno que já rege o que entra em log (Fase 11 adiante formaliza isso pra log; aqui é o equivalente pra resposta HTTP).
+- Não encontrado (`app.ErrWalletNotFound`, `app.ErrWagerTransactionNotFound`, `app.ErrLedgerEntryNotFound`) → `404`
+- Conflito (`app.ErrWalletAlreadyExists`, `app.ErrIdempotencyConflict`) → `409`
+- Validação de input alcançável por JSON bem-formado mas semanticamente inválido (`wallet.ErrNegativeInitialBalance`, `wager.ErrInvalidKind`, `money.ErrInvalidCurrency`, etc. — lista fechada em `validationErrors`, não todo sentinel dos três pacotes) → `400`
+
+**`money.Money` é reusada direto como campo de DTO**, não reimplementada — já tem `MarshalJSON`/`UnmarshalJSON` no formato `{"amount":"...","currency":"..."}` desde a Fase 1, então um `Money` malformado no corpo já vira erro de decode (`400`) antes mesmo de chegar no caso de uso.
+
+**`Idempotency-Key`**: quando presente, é conferido contra `providerId:externalTransactionId` do corpo (`400` se não bater). Isso é só uma checagem de consistência client-facing — o mecanismo de idempotência em si já é inteiramente do corpo, via `WagerSubmitter.Submit` (Fase 5); a ausência do header não abre brecha nenhuma, só perde essa checagem extra.
+
+**Limitação conhecida, documentada aqui e no próprio `NewServer`**: nenhum middleware de autenticação existe ainda (Fase 9). `providerId` nas rotas de wagering vem direto do corpo/path informado pelo cliente, não de uma identidade autenticada — é o oposto do que `wager.WagerTransactionGetter.GetByProvider` já assume ("isolamento é estrutural, quem garante que o valor é da identidade autenticada é a camada HTTP/auth"). Esse é o ponto exato que a Fase 9 precisa fechar; a intenção de design é que nenhum handler precise mudar, só a origem do valor de `providerId` (de path/corpo pra contexto de request populado por um middleware).
+
+**Verificado contra Postgres real, não só com stubs**: `internal/httpapi/integration_test.go` (`//go:build integration`) sobe um `*Server` com repositórios Postgres de verdade e roda um fluxo completo por HTTP — cria wallet, submete BET, replay idempotente (confirma que não duplica saldo nem ledger), submete WIN, consulta por id interno e por `(providerId, externalTransactionId)`, lista ledger, concilia — tudo por cima da API HTTP real, não chamando `internal/app` direto. IdP real (pra fechar a lacuna acima) fica pra depois da Fase 9.
+
 ## Mensageria (SQS)
 
 _(Fase 8)_

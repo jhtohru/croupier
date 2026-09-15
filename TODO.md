@@ -90,12 +90,12 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[doc]` README.md → "Migrations" (comandos de apply/rollback); ARCHITECTURE.md → "Persistência (PostgreSQL)"
 
 ## Fase 7 — internal/httpapi
-- [ ] `[!]` `POST /wallets`, `GET /wallets/:walletId`, `GET /wallets/:walletId/ledger?cursor=&limit=`, `POST /wallets/:walletId/reconciliation`
-- [ ] `[!]` `POST /wagering/transactions` (header `Idempotency-Key`), `GET /wagering/transactions/:transactionId`, `GET /providers/:providerId/wagering/transactions/:externalTransactionId`
-- [ ] `[!]` `GET /health/live`, `GET /health/ready` (checando Postgres e SQS)
-- [ ] `[!]` Middleware de autenticação/autorização (ver Fase 9) aplicado às rotas de negócio
-- [ ] `[!]` Testes de integração HTTP (com Postgres + IdP reais)
-- [ ] `[doc]` README.md → "Exemplos de chamadas"
+- [x] `[!]` `POST /wallets`, `GET /wallets/:walletId`, `GET /wallets/:walletId/ledger?cursor=&limit=`, `POST /wallets/:walletId/reconciliation` — `net/http` puro (stdlib `ServeMux` do Go 1.22+, sem framework de roteamento); DTOs próprios em `internal/httpapi`, não os tipos de domínio direto (`money.Money` é reaproveitado como está, já tem `MarshalJSON`/`UnmarshalJSON` no formato `{"amount":"...","currency":"..."}`)
+- [x] `[!]` `POST /wagering/transactions` (header `Idempotency-Key`), `GET /wagering/transactions/:transactionId`, `GET /providers/:providerId/wagering/transactions/:externalTransactionId` — `Idempotency-Key`, quando presente, é conferido contra `providerId:externalTransactionId` do corpo (checagem de consistência client-facing; o mecanismo de idempotência em si já é só do corpo, via `WagerSubmitter.Submit`, header ausente não enfraquece nada — ver nota da Fase 5)
+- [x] `[!]` `GET /health/live` (sempre 200, sem checar nada), `GET /health/ready` — só Postgres por enquanto via `Deps.Ready func(ctx) error` injetado (SQS entra na Fase 8, sem mudar `internal/httpapi`)
+- [ ] `[!]` Middleware de autenticação/autorização (ver Fase 9) aplicado às rotas de negócio — **ainda não existe**: `providerId` nas rotas de wagering vem direto do path/corpo informado pelo cliente, não de identidade autenticada; documentado como limitação conhecida em `NewServer` e aqui — é o único ponto que a Fase 9 precisa fechar, nenhum handler deve precisar mudar
+- [x] `[!]` Testes de integração HTTP — com Postgres real (`internal/httpapi/integration_test.go`, `//go:build integration`, roda `TestWagerLifecycleOverHTTP` fim-a-fim: cria wallet → submete BET → replay idempotente → submete WIN → consulta por id/por provider → lista ledger → concilia, tudo via HTTP de verdade contra Postgres real); IdP real fica pra depois da Fase 9 (não existe ainda)
+- [x] `[doc]` README.md → "Exemplos de chamadas"
 
 ## Fase 8 — internal/sqs
 - [ ] `[!]` Filas `wager-transactions.fifo` + `wager-transactions-dlq.fifo` com redrive policy
