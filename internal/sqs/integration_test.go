@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -409,4 +411,99 @@ func TestOutboxRecoveryAfterAbandonedPublish(t *testing.T) {
 
 	assert.GreaterOrEqual(t, deliveriesOfThisEvent, 1, "expected at least the successful publish to land on the queue")
 	assert.Empty(t, otherEventIDsSeen, "no other eventId should ever be minted for this same logical event")
+}
+
+// createTestQueueWithDLQ creates a throwaway FIFO queue with a low
+// VisibilityTimeout and a RedrivePolicy pointing at a throwaway DLQ, both
+// deleted on cleanup — mirrors deploy/localstack/init-queues.sh's real
+// wager-transactions.fifo/wager-transactions-dlq.fifo setup, but with a
+// much lower maxReceiveCount/VisibilityTimeout so the test doesn't have to
+// wait through 5 real 30s redeliveries to observe the DLQ actually receive
+// something.
+func createTestQueueWithDLQ(t *testing.T, client *awssqs.Client, namePrefix string, maxReceiveCount int) (queueURL, dlqURL string) {
+	t.Helper()
+	dlqURL = createTestFIFOQueue(t, client, namePrefix+"-dlq")
+
+	dlqAttrs, err := client.GetQueueAttributes(context.Background(), &awssqs.GetQueueAttributesInput{
+		QueueUrl:       aws.String(dlqURL),
+		AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameQueueArn},
+	})
+	require.NoError(t, err)
+	dlqARN := dlqAttrs.Attributes[string(sqstypes.QueueAttributeNameQueueArn)]
+
+	redrivePolicy, err := json.Marshal(map[string]string{
+		"deadLetterTargetArn": dlqARN,
+		"maxReceiveCount":     strconv.Itoa(maxReceiveCount),
+	})
+	require.NoError(t, err)
+
+	name := namePrefix + "-" + strings.ReplaceAll(uuid.New().String(), "-", "") + ".fifo"
+	out, err := client.CreateQueue(context.Background(), &awssqs.CreateQueueInput{
+		QueueName: aws.String(name),
+		Attributes: map[string]string{
+			"FifoQueue":                 "true",
+			"ContentBasedDeduplication": "true",
+			"VisibilityTimeout":         "1",
+			"RedrivePolicy":             string(redrivePolicy),
+		},
+	})
+	require.NoError(t, err)
+	queueURL = aws.ToString(out.QueueUrl)
+	t.Cleanup(func() {
+		_, _ = client.DeleteQueue(context.Background(), &awssqs.DeleteQueueInput{QueueUrl: aws.String(queueURL)})
+	})
+	return queueURL, dlqURL
+}
+
+// TestConsumerMovesUnprocessableMessageToDLQ is the mandatory §13.22
+// scenario ("Verifique DLQ") end to end, against a real redrive policy —
+// every other test in this package proves individual pieces of resilience
+// (redelivery after a crash, idempotency, ...) but none of them ever
+// actually force a message past maxReceiveCount and observe it land on the
+// DLQ, which is the one thing ARCHITECTURE.md/TODO.md previously admitted
+// was only read in the code, never exercised.
+func TestConsumerMovesUnprocessableMessageToDLQ(t *testing.T) {
+	client := testSQSClient(t)
+	queueURL, dlqURL := createTestQueueWithDLQ(t, client, "wager-transactions-dlq-test", 2)
+
+	// Malformed envelope: handle() fails json.Unmarshal on every single
+	// delivery, deterministically — never reaches Submit, never deletes the
+	// message, exactly the "erro permanente" path documented in
+	// ARCHITECTURE.md's "Tratamento de mensagens inválidas."
+	_, err := client.SendMessage(context.Background(), &awssqs.SendMessageInput{
+		QueueUrl:       aws.String(queueURL),
+		MessageBody:    aws.String("not valid json"),
+		MessageGroupId: aws.String(uuid.NewString()),
+	})
+	require.NoError(t, err)
+
+	submitter := &fakeWagerSubmitter{}
+	inboxRepo := newFakeInboxRepository()
+	consumer := NewConsumer(client, queueURL, "dlq-test-consumer", submitter, inboxRepo, nil)
+	consumer.waitTime = 1
+	consumer.maxMessages = 1
+
+	runCtx, cancelRun := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelRun()
+	runErr := make(chan error, 1)
+	go func() { runErr <- consumer.Run(runCtx) }()
+
+	var dlqBody string
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := client.ReceiveMessage(context.Background(), &awssqs.ReceiveMessageInput{
+			QueueUrl: aws.String(dlqURL), MaxNumberOfMessages: 1, WaitTimeSeconds: 1,
+		})
+		require.NoError(t, err)
+		if len(out.Messages) > 0 {
+			dlqBody = aws.ToString(out.Messages[0].Body)
+			break
+		}
+	}
+
+	cancelRun()
+	<-runErr
+
+	require.NotEmpty(t, dlqBody, "the unprocessable message should have been moved to the DLQ after maxReceiveCount deliveries")
+	assert.Equal(t, "not valid json", dlqBody)
 }
