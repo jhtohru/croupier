@@ -91,9 +91,21 @@ type Consumer struct {
 	consumerName string
 	submitter    wagerSubmitter
 	inbox        app.InboxRepository
+	txManager    app.TxManager
 	waitTime     int32
 	maxMessages  int32
 	metrics      metricsRecorder
+}
+
+// withinTx runs fn, wrapped in c.txManager.WithinTx when one is configured.
+// A nil txManager (every unit test in this package, which exercises handle
+// against fakes that don't need real atomicity) is a safe no-op passthrough
+// — same nil-is-fine convention as metricsRecorder above.
+func (c *Consumer) withinTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if c.txManager == nil {
+		return fn(ctx)
+	}
+	return c.txManager.WithinTx(ctx, fn)
 }
 
 // ConsumerOption customizes a Consumer built by NewConsumer — same variadic-
@@ -104,13 +116,14 @@ func WithMetrics(m metricsRecorder) ConsumerOption {
 	return func(c *Consumer) { c.metrics = m }
 }
 
-func NewConsumer(client *sqs.Client, queueURL, consumerName string, submitter wagerSubmitter, inboxRepo app.InboxRepository, opts ...ConsumerOption) *Consumer {
+func NewConsumer(client *sqs.Client, queueURL, consumerName string, submitter wagerSubmitter, inboxRepo app.InboxRepository, txManager app.TxManager, opts ...ConsumerOption) *Consumer {
 	c := &Consumer{
 		client:       client,
 		queueURL:     queueURL,
 		consumerName: consumerName,
 		submitter:    submitter,
 		inbox:        inboxRepo,
+		txManager:    txManager,
 		waitTime:     20,
 		maxMessages:  10,
 	}
@@ -229,44 +242,71 @@ func (c *Consumer) handle(ctx context.Context, msg types.Message, correlationID 
 	if err != nil && !errors.Is(err, app.ErrInboxEntryNotFound) {
 		return err
 	}
-	switch {
-	case entry == nil:
-		entry, err = inbox.New(inbox.NewInput{ConsumerName: c.consumerName, MessageID: messageID, PayloadHash: hash})
-		if err != nil {
-			return err
+	if entry != nil {
+		switch {
+		case entry.PayloadHash() != hash:
+			return fmt.Errorf("sqs consumer: messageId %s redelivered with different content than first seen", messageID)
+		case entry.IsCompleted():
+			// Pure redelivery of work we already finished — this is exactly
+			// the "interrupted after commit, before delete" recovery case:
+			// ack (delete, back in processMessage) without calling Submit
+			// again.
+			return nil
 		}
-		if err := c.inbox.Save(ctx, entry); err != nil {
-			return err
-		}
-	case entry.PayloadHash() != hash:
-		return fmt.Errorf("sqs consumer: messageId %s redelivered with different content than first seen", messageID)
-	case entry.IsCompleted():
-		// Pure redelivery of work we already finished — this is exactly the
-		// "interrupted after commit, before delete" recovery case: ack
-		// (delete, back in processMessage) without calling Submit again.
-		return nil
 	}
-	// entry exists but isn't completed: a previous attempt crashed between
-	// Submit and MarkCompleted below. Falling through to retry Submit is
-	// safe regardless — it's independently idempotent on
-	// providerId:externalTransactionId (Fase 5), Inbox is a second,
-	// cheaper layer of dedup on top, not the correctness mechanism itself.
 
-	result, err := c.submitter.Submit(ctx, app.SubmitWagerTransactionInput{
-		ProviderID:                     req.ProviderID,
-		ExternalTransactionID:          req.ExternalTransactionID,
-		PlayerID:                       req.PlayerID,
-		WalletID:                       req.WalletID,
-		RoundID:                        req.RoundID,
-		GameID:                         req.GameID,
-		Kind:                           req.Kind,
-		Amount:                         req.Money,
-		ReferenceExternalTransactionID: req.ReferenceExternalTransactionID,
-		CorrelationID:                  correlationID,
+	// Challenge spec §6.5.5 ("o registro da inbox e a conclusão durável do
+	// tratamento devem compartilhar a transação SQL das alterações de
+	// domínio, do ledger e dos eventos correspondentes"): the inbox
+	// row (new or being marked completed), Submit's wallet/ledger/wager/
+	// outbox writes, and the final completed save all commit together or
+	// not at all — TxManager.WithinTx is reentrant (see postgres.TxManager),
+	// so Submit's own internal WithinTx joins this same transaction instead
+	// of opening a second, unrelated one. A crash anywhere in this block
+	// leaves nothing committed; redelivery starts over from entry == nil,
+	// exactly as if this attempt had never happened.
+	var result *app.SubmitWagerTransactionResult
+	err = c.withinTx(ctx, func(ctx context.Context) error {
+		if entry == nil {
+			entry, err = inbox.New(inbox.NewInput{ConsumerName: c.consumerName, MessageID: messageID, PayloadHash: hash})
+			if err != nil {
+				return err
+			}
+			if err := c.inbox.Save(ctx, entry); err != nil {
+				return err
+			}
+		}
+		// entry already existed but wasn't completed: a previous attempt
+		// crashed between Submit and MarkCompleted. Retrying Submit is
+		// safe regardless — it's independently idempotent on
+		// providerId:externalTransactionId (Fase 5), Inbox is a second,
+		// cheaper layer of dedup on top, not the correctness mechanism
+		// itself.
+		var submitErr error
+		result, submitErr = c.submitter.Submit(ctx, app.SubmitWagerTransactionInput{
+			ProviderID:                     req.ProviderID,
+			ExternalTransactionID:          req.ExternalTransactionID,
+			PlayerID:                       req.PlayerID,
+			WalletID:                       req.WalletID,
+			RoundID:                        req.RoundID,
+			GameID:                         req.GameID,
+			Kind:                           req.Kind,
+			Amount:                         req.Money,
+			ReferenceExternalTransactionID: req.ReferenceExternalTransactionID,
+			CorrelationID:                  correlationID,
+		})
+		if submitErr != nil {
+			return submitErr
+		}
+		if err := entry.MarkCompleted(); err != nil {
+			return err
+		}
+		return c.inbox.Save(ctx, entry)
 	})
 	if err != nil {
 		return err
 	}
+
 	outcome := wagerOutcome(result)
 	if c.metrics != nil {
 		c.metrics.ObserveWagerSubmission(string(req.Kind), outcome)
@@ -277,11 +317,7 @@ func (c *Consumer) handle(ctx context.Context, msg types.Message, correlationID 
 		"consumer", c.consumerName, "messageId", messageID, "correlationId", correlationID,
 		"providerId", req.ProviderID, "externalTransactionId", req.ExternalTransactionID,
 		"walletId", req.WalletID, "outcome", outcome)
-
-	if err := entry.MarkCompleted(); err != nil {
-		return err
-	}
-	return c.inbox.Save(ctx, entry)
+	return nil
 }
 
 // wagerOutcome classifies a submission result for logs/metrics — mirrors

@@ -79,12 +79,12 @@ func provideOutboxPublisher(client *awssqs.Client, cfg *Config) (app.OutboxPubli
 	return croupiersqs.NewPublisher(client, url), nil
 }
 
-func provideConsumer(client *awssqs.Client, submitter *app.WagerSubmitter, inboxRepo app.InboxRepository, cfg *Config, reg *metrics.Registry) (*croupiersqs.Consumer, error) {
+func provideConsumer(client *awssqs.Client, submitter *app.WagerSubmitter, inboxRepo app.InboxRepository, txManager app.TxManager, cfg *Config, reg *metrics.Registry) (*croupiersqs.Consumer, error) {
 	url, err := resolveQueueURL(client, cfg.WagerTransactionsQueueName)
 	if err != nil {
 		return nil, err
 	}
-	return croupiersqs.NewConsumer(client, url, cfg.SQSConsumerName, submitter, inboxRepo, croupiersqs.WithMetrics(reg)), nil
+	return croupiersqs.NewConsumer(client, url, cfg.SQSConsumerName, submitter, inboxRepo, txManager, croupiersqs.WithMetrics(reg)), nil
 }
 
 func providePendingReferenceResolver(wagers app.WagerRepository, submitter *app.WagerSubmitter, cfg *Config, reg *metrics.Registry) *app.PendingReferenceResolver {

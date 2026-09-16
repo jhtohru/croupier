@@ -127,7 +127,7 @@ func TestConsumerConsumesRealSQSMessage(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	consumer := NewConsumer(client, queueURL, "wager-transactions-consumer-test", submitter, inboxRepo)
+	consumer := NewConsumer(client, queueURL, "wager-transactions-consumer-test", submitter, inboxRepo, txManager)
 	consumer.waitTime = 2
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -193,7 +193,7 @@ func TestConsumerRedeliveryAfterCommitBeforeDelete(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	consumer := NewConsumer(client, queueURL, "redelivery-test-consumer", submitter, inboxRepo)
+	consumer := NewConsumer(client, queueURL, "redelivery-test-consumer", submitter, inboxRepo, txManager)
 
 	// First delivery: receive it directly (bypassing consumer.Run's loop, so
 	// the test controls exactly what happens between receipt and delete) and

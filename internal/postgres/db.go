@@ -89,7 +89,17 @@ func NewTxManager(pool *pgxpool.Pool) *TxManager {
 	return &TxManager{pool: pool}
 }
 
+// WithinTx is reentrant: if ctx already carries a transaction (a caller
+// composing multiple TxManager-using operations into one atomic unit, e.g.
+// internal/sqs.Consumer wrapping an inbox save around app.WagerSubmitter's
+// own WithinTx call), it joins that transaction instead of opening a second,
+// unrelated one on a different pool connection — only the outermost call
+// begins/commits/rolls back.
 func (m *TxManager) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if _, ok := txFromContext(ctx); ok {
+		return fn(ctx)
+	}
+
 	tx, err := m.pool.Begin(ctx)
 	if err != nil {
 		return wrapTransientErr(err)

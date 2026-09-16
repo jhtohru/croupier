@@ -119,7 +119,7 @@ func TestSameOperationOverHTTPAndSQSIsNotDuplicated(t *testing.T) {
 	queueURL := aws.ToString(createOut.QueueUrl)
 	t.Cleanup(func() { _, _ = sqsClient.DeleteQueue(ctx, &awssqs.DeleteQueueInput{QueueUrl: aws.String(queueURL)}) })
 
-	consumer := croupiersqs.NewConsumer(sqsClient, queueURL, "http-sqs-duplicate-test-consumer", submitter, inboxRepo)
+	consumer := croupiersqs.NewConsumer(sqsClient, queueURL, "http-sqs-duplicate-test-consumer", submitter, inboxRepo, txManager)
 
 	balance, err := money.FromMinorUnits("BRL", 10000)
 	require.NoError(t, err)
