@@ -27,22 +27,15 @@ func configureLogging() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 }
 
-func main() {
-	configureLogging()
-
-	cfg, err := LoadConfig()
-	if err != nil {
-		slog.Error("failed to load config", "error", err)
-		os.Exit(1)
-	}
-
-	if err := postgres.ApplyMigrations(cfg.PostgresDSN); err != nil {
-		slog.Error("failed to apply migrations", "error", err)
-		os.Exit(1)
-	}
-	slog.Info("migrations applied")
-
-	fxApp := fx.New(
+// newFxApp builds the app's whole dependency graph — factored out of main
+// so an integration test can build and Start/Stop the exact same graph
+// against test infrastructure (challenge spec §13.24: "Adicione uma
+// verificação da composição Fx e de seu início e encerramento, incluindo
+// liberação de recursos dos workers" — see cmd/croupier/fx_test.go).
+// extraOpts is empty in production; the test appends fx.Populate to reach
+// into the graph without adding a test-only export from this package.
+func newFxApp(cfg *Config, extraOpts ...fx.Option) *fx.App {
+	opts := []fx.Option{
 		fx.Supply(cfg),
 		fx.Provide(
 			providePostgresPool,
@@ -82,8 +75,28 @@ func main() {
 			registerDLQDepthPoller,
 		),
 		fx.StartTimeout(cfg.ShutdownTimeout),
-		fx.StopTimeout(cfg.ShutdownTimeout+5*time.Second),
-	)
+		fx.StopTimeout(cfg.ShutdownTimeout + 5*time.Second),
+	}
+	opts = append(opts, extraOpts...)
+	return fx.New(opts...)
+}
+
+func main() {
+	configureLogging()
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
+	if err := postgres.ApplyMigrations(cfg.PostgresDSN); err != nil {
+		slog.Error("failed to apply migrations", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("migrations applied")
+
+	fxApp := newFxApp(cfg)
 
 	ctx := context.Background()
 	if err := fxApp.Start(ctx); err != nil {
