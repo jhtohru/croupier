@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jhtohru/croupier/internal/app"
@@ -55,7 +56,19 @@ func (r *WagerRepository) Save(ctx context.Context, tx *wager.Transaction) error
 		string(tx.Amount().Currency()), tx.Amount().Amount(), tx.ReferenceExternalTransactionID(),
 		tx.ReferenceTransactionID(), failureCode, payloadHash[:], tx.CreatedAt(), tx.UpdatedAt(),
 	)
-	return err
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "wager_transactions_provider_external_unique" {
+			// Lost a race: some other concurrent Save for this exact
+			// (providerId, externalTransactionId) — necessarily a different
+			// tx.ID(), since ON CONFLICT (id) above only catches a retry of
+			// this same row — committed first. WagerSubmitter.Submit catches
+			// this and retries as a plain idempotent replay.
+			return app.ErrWagerTransactionAlreadyExists
+		}
+		return err
+	}
+	return nil
 }
 
 func (r *WagerRepository) FindByID(ctx context.Context, id uuid.UUID) (*wager.Transaction, error) {

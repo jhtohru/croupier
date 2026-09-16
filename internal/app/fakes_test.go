@@ -108,7 +108,22 @@ type fakeWagerRepository struct {
 	nextRetryAt  map[uuid.UUID]time.Time
 }
 
+// Save mirrors the real WagerRepository's unique-constraint behavior on
+// (providerId, externalTransactionId): a different tx.ID() trying to claim
+// a pair some other transaction already holds is rejected, same as
+// Postgres's wager_transactions_provider_external_unique. Empty
+// providerId/externalTransactionId (OPENING transactions) never collide,
+// same NULL-is-distinct reasoning as the real schema.
 func (r *fakeWagerRepository) Save(ctx context.Context, tx *wager.Transaction) error {
+	if tx.ProviderID() != "" || tx.ExternalTransactionID() != "" {
+		for _, existing := range r.transactions {
+			if existing.ID() != tx.ID() &&
+				existing.ProviderID() == tx.ProviderID() &&
+				existing.ExternalTransactionID() == tx.ExternalTransactionID() {
+				return ErrWagerTransactionAlreadyExists
+			}
+		}
+	}
 	r.transactions = append(r.transactions, tx)
 	return nil
 }

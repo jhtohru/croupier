@@ -27,13 +27,16 @@ import (
 // testPool connects to a real Postgres — TEST_DATABASE_URL, or the
 // docker-compose default. Migrations (internal/postgres/migrations) must
 // already be applied; see README.md.
+func testDSN() string {
+	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
+		return dsn
+	}
+	return "postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable"
+}
+
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable"
-	}
-	pool, err := pgxpool.New(context.Background(), dsn)
+	pool, err := pgxpool.New(context.Background(), testDSN())
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	require.NoError(t, pool.Ping(context.Background()))
@@ -124,6 +127,80 @@ func TestWagerRepositoryTwoOpeningTransactionsCoexist(t *testing.T) {
 	}
 }
 
+// TestWagerSubmitterConcurrentDuplicateSubmissions is the other mandatory
+// concurrency scenario: 50 parallel requests submitting the exact same bet
+// (same providerId:externalTransactionId, same everything) must produce
+// exactly one debit — every other caller gets back a clean idempotent
+// replay, not an error.
+func TestWagerSubmitterConcurrentDuplicateSubmissions(t *testing.T) {
+	pool := testPool(t)
+	walletRepo := postgres.NewWalletRepository(pool)
+	wagerRepo := postgres.NewWagerRepository(pool)
+	outboxRepo := postgres.NewOutboxRepository(pool)
+	txManager := postgres.NewTxManager(pool)
+
+	balance, err := money.FromMinorUnits("BRL", 10000)
+	require.NoError(t, err)
+	w, err := wallet.New(uuid.New(), balance)
+	require.NoError(t, err)
+	require.NoError(t, walletRepo.Save(context.Background(), w))
+
+	submitter := app.NewWagerSubmitter(walletRepo, wagerRepo, outboxRepo, txManager)
+
+	betAmount, err := money.FromMinorUnits("BRL", 3000)
+	require.NoError(t, err)
+	externalTransactionID := uuid.New().String()
+
+	const n = 50
+	var wg sync.WaitGroup
+	results := make([]*app.SubmitWagerTransactionResult, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
+				ProviderID: "provider-a", ExternalTransactionID: externalTransactionID,
+				PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+				Kind: wager.KindBet, Amount: betAmount,
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	firstProcessed, replays := 0, 0
+	var transactionID uuid.UUID
+	for i := 0; i < n; i++ {
+		require.NoError(t, errs[i], "call %d", i)
+		require.NotNil(t, results[i], "call %d", i)
+		assert.Equal(t, wager.TxStatusProcessed, results[i].Transaction.Status(), "call %d", i)
+		if results[i].IdempotentReplay {
+			replays++
+		} else {
+			firstProcessed++
+		}
+		if transactionID == uuid.Nil {
+			transactionID = results[i].Transaction.ID()
+		}
+		// All 50 calls must agree on which transaction this was — a second,
+		// different id here would mean the unique constraint let two rows
+		// through for the same (providerId, externalTransactionId).
+		assert.Equal(t, transactionID, results[i].Transaction.ID(), "call %d", i)
+	}
+	assert.Equal(t, 1, firstProcessed)
+	assert.Equal(t, n-1, replays)
+
+	final, err := walletRepo.FindByID(context.Background(), w.ID())
+	require.NoError(t, err)
+	wantBalance, err := money.FromMinorUnits("BRL", 7000)
+	require.NoError(t, err)
+	assert.Equal(t, wantBalance, final.Balance())
+
+	entries, err := walletRepo.AllLedgerEntries(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "exactly one debit, not one per winning goroutine")
+}
+
 // TestWagerSubmitterConcurrentBets is the mandatory scenario: a wallet with
 // 100.00 BRL receives two concurrent 80.00 BRL bets. Exactly one must be
 // processed, the other rejected for insufficient balance, final balance
@@ -189,6 +266,143 @@ func TestWagerSubmitterConcurrentBets(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, entries, 1)
 	assert.Equal(t, wallet.DirectionDebit, entries[0].Direction())
+}
+
+// TestWalletRepositoryFindByIDLocksPerRowNotGlobally is the mandatory
+// "wallets distintas processam em paralelo sem lock global" scenario,
+// proven directly against the locking primitive itself rather than via a
+// wall-clock timing heuristic on the full Submit flow: hold wallet A's row
+// lock open in one transaction, and confirm a concurrent FindByID on wallet
+// B — a completely different row — is never blocked behind it.
+func TestWalletRepositoryFindByIDLocksPerRowNotGlobally(t *testing.T) {
+	pool := testPool(t)
+	walletRepo := postgres.NewWalletRepository(pool)
+	txManager := postgres.NewTxManager(pool)
+
+	balance, err := money.FromMinorUnits("BRL", 10000)
+	require.NoError(t, err)
+	walletA, err := wallet.New(uuid.New(), balance)
+	require.NoError(t, err)
+	require.NoError(t, walletRepo.Save(context.Background(), walletA))
+	walletB, err := wallet.New(uuid.New(), balance)
+	require.NoError(t, err)
+	require.NoError(t, walletRepo.Save(context.Background(), walletB))
+
+	holdingLock := make(chan struct{})
+	releaseLock := make(chan struct{})
+	txAErr := make(chan error, 1)
+	go func() {
+		txAErr <- txManager.WithinTx(context.Background(), func(ctx context.Context) error {
+			if _, err := walletRepo.FindByID(ctx, walletA.ID()); err != nil {
+				return err
+			}
+			close(holdingLock)
+			<-releaseLock
+			return nil
+		})
+	}()
+
+	<-holdingLock // wallet A's row lock is now held open, deliberately
+
+	done := make(chan error, 1)
+	go func() {
+		done <- txManager.WithinTx(context.Background(), func(ctx context.Context) error {
+			_, err := walletRepo.FindByID(ctx, walletB.ID())
+			return err
+		})
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("locking wallet A's row blocked an unrelated read of wallet B — lock is not scoped per row")
+	}
+
+	close(releaseLock)
+	require.NoError(t, <-txAErr)
+}
+
+// TestConcurrentBetsAcrossMultipleAppInstances is the mandatory "3+
+// instâncias independentes replicam os cenários acima" scenario: three
+// wholly independent stacks (own *pgxpool.Pool, own repositories, own
+// *app.WagerSubmitter — exactly what three separate cmd/croupier processes
+// would each have) submit concurrent bets against one shared wallet.
+// Correctness has to come from Postgres's own row lock, since these three
+// "instances" share no in-process state whatsoever to coordinate through.
+func TestConcurrentBetsAcrossMultipleAppInstances(t *testing.T) {
+	dsn := testDSN()
+	const numInstances = 3
+
+	type instance struct {
+		submitter *app.WagerSubmitter
+	}
+	newInstance := func() instance {
+		pool, err := pgxpool.New(context.Background(), dsn)
+		require.NoError(t, err)
+		t.Cleanup(pool.Close)
+		wallets := postgres.NewWalletRepository(pool)
+		wagers := postgres.NewWagerRepository(pool)
+		outboxRepo := postgres.NewOutboxRepository(pool)
+		txManager := postgres.NewTxManager(pool)
+		return instance{submitter: app.NewWagerSubmitter(wallets, wagers, outboxRepo, txManager)}
+	}
+
+	instances := make([]instance, numInstances)
+	for i := range instances {
+		instances[i] = newInstance()
+	}
+
+	walletRepo := postgres.NewWalletRepository(testPool(t))
+	balance, err := money.FromMinorUnits("BRL", 10000)
+	require.NoError(t, err)
+	w, err := wallet.New(uuid.New(), balance)
+	require.NoError(t, err)
+	require.NoError(t, walletRepo.Save(context.Background(), w))
+
+	betAmount, err := money.FromMinorUnits("BRL", 8000)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	results := make([]*app.SubmitWagerTransactionResult, numInstances)
+	errs := make([]error, numInstances)
+	for i := 0; i < numInstances; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = instances[i].submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
+				ProviderID: "provider-a", ExternalTransactionID: uuid.New().String(),
+				PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+				Kind: wager.KindBet, Amount: betAmount,
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	// Only one 80.00 bet fits in a 100.00 wallet — same "one wins, the rest
+	// lose" invariant as the two-instance mandatory scenario, just spread
+	// across three independent instances instead of two goroutines in one.
+	processed, rejected := 0, 0
+	for i := 0; i < numInstances; i++ {
+		require.NoError(t, errs[i], "instance %d", i)
+		switch results[i].Transaction.Status() {
+		case wager.TxStatusProcessed:
+			processed++
+		case wager.TxStatusRejected:
+			rejected++
+			assert.Equal(t, app.FailureCodeInsufficientBalance, results[i].Transaction.FailureCode())
+		default:
+			t.Fatalf("instance %d: unexpected status %s", i, results[i].Transaction.Status())
+		}
+	}
+	assert.Equal(t, 1, processed)
+	assert.Equal(t, numInstances-1, rejected)
+
+	final, err := walletRepo.FindByID(context.Background(), w.ID())
+	require.NoError(t, err)
+	wantBalance, err := money.FromMinorUnits("BRL", 2000)
+	require.NoError(t, err)
+	assert.Equal(t, wantBalance, final.Balance())
 }
 
 // drainOutboxBacklog claims and marks published every currently-due PENDING

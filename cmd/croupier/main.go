@@ -14,6 +14,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/jhtohru/croupier/internal/app"
+	"github.com/jhtohru/croupier/internal/postgres"
 )
 
 func main() {
@@ -23,7 +24,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := runMigrations(cfg.PostgresDSN); err != nil {
+	if err := postgres.ApplyMigrations(cfg.PostgresDSN); err != nil {
 		slog.Error("failed to apply migrations", "error", err)
 		os.Exit(1)
 	}

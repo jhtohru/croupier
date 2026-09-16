@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jhtohru/croupier/internal/money"
 	"github.com/jhtohru/croupier/internal/wager"
@@ -310,4 +311,75 @@ func TestWagerSubmitterSubmit(t *testing.T) {
 		assert.ErrorIs(t, err, ErrIdempotencyConflict)
 		assert.Nil(t, result)
 	})
+}
+
+// raceyWagerRepository simulates the real unique-constraint race Postgres
+// enforces: the first Save for a given (providerId, externalTransactionId)
+// pretends a concurrent Submit for the exact same key already committed its
+// own row moments earlier, exactly like WagerRepository.Save translates a
+// real "wager_transactions_provider_external_unique" violation.
+type raceyWagerRepository struct {
+	*fakeWagerRepository
+	winner    *wager.Transaction
+	triggered bool
+}
+
+func (r *raceyWagerRepository) Save(ctx context.Context, tx *wager.Transaction) error {
+	if !r.triggered && tx.ProviderID() == r.winner.ProviderID() && tx.ExternalTransactionID() == r.winner.ExternalTransactionID() {
+		r.triggered = true
+		r.fakeWagerRepository.transactions = append(r.fakeWagerRepository.transactions, r.winner)
+		return ErrWagerTransactionAlreadyExists
+	}
+	return r.fakeWagerRepository.Save(ctx, tx)
+}
+
+// TestWagerSubmitterSubmitRetriesAsReplayOnInsertRace exercises the Fase 12
+// mandatory scenario's failure mode directly and deterministically (the
+// integration-level version, TestWagerSubmitterConcurrentDuplicateSubmissions
+// in internal/postgres, proves it under real concurrency against real
+// Postgres — this test isolates just Submit's retry control flow): losing
+// the race to insert (providerId, externalTransactionId) must produce a
+// clean idempotent replay against the winner, never a raw error.
+func TestWagerSubmitterSubmitRetriesAsReplayOnInsertRace(t *testing.T) {
+	wallets := newFakeWalletRepository()
+	outboxRepo := &fakeOutboxRepository{}
+
+	balance := mustAmount(t, 10000)
+	w, err := wallet.New(uuid.New(), balance)
+	require.NoError(t, err)
+	require.NoError(t, wallets.Save(context.Background(), w))
+
+	winnerInput := SubmitWagerTransactionInput{
+		ProviderID: "provider-a", ExternalTransactionID: "bet-1",
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindBet, Amount: mustAmount(t, 3000),
+	}
+	winner, err := wager.NewTransaction(wager.NewTransactionInput{
+		ProviderID: winnerInput.ProviderID, ExternalTransactionID: winnerInput.ExternalTransactionID,
+		PlayerID: winnerInput.PlayerID, WalletID: winnerInput.WalletID,
+		RoundID: winnerInput.RoundID, GameID: winnerInput.GameID,
+		Kind: winnerInput.Kind, Amount: winnerInput.Amount,
+	})
+	require.NoError(t, err)
+	require.NoError(t, winner.MarkProcessed())
+	entry, err := wallet.NewLedgerEntry(wallet.NewLedgerEntryInput{
+		WalletID: w.ID(), TransactionID: winner.ID(), Direction: wallet.DirectionDebit,
+		Amount: winnerInput.Amount, BalanceBefore: balance, BalanceAfter: mustAmount(t, 7000),
+	})
+	require.NoError(t, err)
+	require.NoError(t, wallets.SaveLedgerEntry(context.Background(), entry))
+
+	wagers := &raceyWagerRepository{fakeWagerRepository: &fakeWagerRepository{}, winner: winner}
+	submitter := NewWagerSubmitter(wallets, wagers, outboxRepo, fakeTxManager{})
+
+	// Same content as winnerInput — a genuine race between two identical
+	// submissions, not a conflict.
+	result, err := submitter.Submit(context.Background(), winnerInput)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.IdempotentReplay)
+	assert.Equal(t, winner.ID(), result.Transaction.ID())
+	assert.Equal(t, mustAmount(t, 7000), result.Balance) // the winner's observed balance, not a second debit
+	assert.True(t, wagers.triggered)
 }

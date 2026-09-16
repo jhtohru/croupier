@@ -197,27 +197,24 @@ go test -race ./...
 go vet ./...
 ```
 
-Testes de integração de `internal/postgres` (`//go:build integration`) exigem Postgres real com as migrations aplicadas — ver "Migrations" acima. **Rode com o serviço `app` parado** (`docker compose stop app`): o `OutboxWorker` dele compete de verdade pela tabela `outbox` com os testes de concorrência do outbox (`TestOutboxRepositoryFindDueForUpdateSkipsLockedRows`), que assumem acesso exclusivo à tabela pra fazer afirmação sobre quem reivindicou qual linha — não é um bug do `SELECT ... FOR UPDATE SKIP LOCKED` (que continua correto com ou sem o `app` rodando), é o teste que não tem como afirmar nada específico sobre concorrência de duas goroutines se existe uma terceira reivindicando linhas ao mesmo tempo:
+Testes de integração (`//go:build integration`) exigem Postgres real — mas **não precisam de nenhuma configuração manual de banco**: `internal/postgres`, `internal/httpapi`, `internal/sqs` e `cmd/croupier` cada um tem seu próprio `TestMain` (`internal/testdb`) que dropa/recria e migra sozinho um banco dedicado (`croupier_test_postgres`, `croupier_test_httpapi`, ...) toda vez que rodam — nunca o banco `croupier` que o serviço `app` usa. Pode rodar com o `app` no ar sem medo: eles não competem pela mesma tabela nem pelo mesmo banco, estruturalmente. Só usa `POSTGRES_HOST`/`PORT`/`USER`/`PASSWORD` (as mesmas variáveis de sempre — ver `.env.example`), nenhuma `TEST_DATABASE_URL` pra configurar:
 ```sh
 docker compose up -d postgres
-docker compose stop app 2>/dev/null # se estiver rodando
-# aplicar as migrations (comandos na seção "Migrations")
-TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
-  go test -tags integration -race -count=1 ./internal/postgres/...
+go test -tags integration -race -count=1 ./internal/postgres/...
 ```
 
 Testes de integração de `internal/sqs` exigem Postgres **e** LocalStack (as filas são provisionadas sozinhas — ver "Inicialização das filas" acima):
 ```sh
 docker compose up -d postgres localstack
-TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
 SQS_ENDPOINT="http://localhost:4566" \
   go test -tags integration -race -count=1 ./internal/sqs/...
 ```
 
-Testes de integração de `internal/auth` exigem Keycloak real (realm provisionado sozinho — ver "Autenticação" acima); `internal/httpapi` exige Postgres **e** Keycloak juntos, já que o fluxo completo passa pelos dois:
+Testes de integração de `internal/auth` exigem Keycloak real (realm provisionado sozinho — ver "Autenticação" acima); `internal/httpapi` e `cmd/croupier` exigem Postgres **e** Keycloak juntos, já que o fluxo completo passa pelos dois (`cmd/croupier` exige LocalStack também, já que testa HTTP e SQS juntos):
 ```sh
-docker compose up -d postgres keycloak
-TEST_DATABASE_URL="postgres://croupier:croupier@localhost:5432/croupier?sslmode=disable" \
+docker compose up -d postgres keycloak localstack
 KEYCLOAK_ISSUER_URL="http://localhost:8080/realms/croupier" \
   go test -tags integration -race -count=1 ./internal/auth/... ./internal/httpapi/...
+KEYCLOAK_ISSUER_URL="http://localhost:8080/realms/croupier" SQS_ENDPOINT="http://localhost:4566" \
+  go test -tags integration -race -count=1 ./cmd/croupier/...
 ```

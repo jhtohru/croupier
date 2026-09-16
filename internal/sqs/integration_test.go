@@ -5,6 +5,7 @@ package sqs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/jhtohru/croupier/internal/app"
 	"github.com/jhtohru/croupier/internal/money"
+	"github.com/jhtohru/croupier/internal/outbox"
 	"github.com/jhtohru/croupier/internal/postgres"
 	"github.com/jhtohru/croupier/internal/wager"
 	"github.com/jhtohru/croupier/internal/wallet"
@@ -140,6 +142,91 @@ func TestConsumerConsumesRealSQSMessage(t *testing.T) {
 	}, 15*time.Second, 100*time.Millisecond, "wallet balance never reflected the consumed BET")
 }
 
+// TestConsumerRedeliveryAfterCommitBeforeDelete is the mandatory
+// "interromper consumer após commit e antes da remoção da mensagem →
+// verificar redelivery" scenario against real SQS, going further than the
+// fake-based TestConsumerHandle/redelivery_of_already-completed_work_does_not_resubmit:
+// here the "redelivery" is a real SQS ReceiveMessage returning the same
+// message a second time (via ChangeMessageVisibility instead of waiting out
+// a real 30s visibility timeout), not something the test constructs by
+// hand.
+func TestConsumerRedeliveryAfterCommitBeforeDelete(t *testing.T) {
+	client := testSQSClient(t)
+	queueURL := createTestFIFOQueue(t, client, "wager-transactions-redelivery-test")
+	pool := testPool(t)
+
+	walletRepo := postgres.NewWalletRepository(pool)
+	wagerRepo := postgres.NewWagerRepository(pool)
+	outboxRepo := postgres.NewOutboxRepository(pool)
+	txManager := postgres.NewTxManager(pool)
+	submitter := app.NewWagerSubmitter(walletRepo, wagerRepo, outboxRepo, txManager)
+	inboxRepo := postgres.NewInboxRepository(pool)
+
+	balance, err := money.FromMinorUnits("BRL", 10000)
+	require.NoError(t, err)
+	w, err := wallet.New(uuid.New(), balance)
+	require.NoError(t, err)
+	require.NoError(t, walletRepo.Save(context.Background(), w))
+
+	body, err := json.Marshal(wagerTransactionMessage{
+		ProviderID: "provider-" + uuid.New().String(), ExternalTransactionID: "ext-" + uuid.New().String(),
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindBet, Amount: mustMoney(t, "30.00"),
+	})
+	require.NoError(t, err)
+	_, err = client.SendMessage(context.Background(), &awssqs.SendMessageInput{
+		QueueUrl: aws.String(queueURL), MessageBody: aws.String(string(body)), MessageGroupId: aws.String(w.ID().String()),
+	})
+	require.NoError(t, err)
+
+	consumer := NewConsumer(client, queueURL, "redelivery-test-consumer", submitter, inboxRepo)
+
+	// First delivery: receive it directly (bypassing consumer.Run's loop, so
+	// the test controls exactly what happens between receipt and delete) and
+	// hand it to handle — the real commit, real Postgres included, but
+	// deliberately never deleted from the queue afterward.
+	out, err := client.ReceiveMessage(context.Background(), &awssqs.ReceiveMessageInput{
+		QueueUrl: aws.String(queueURL), MaxNumberOfMessages: 1, WaitTimeSeconds: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, out.Messages, 1)
+	msg := out.Messages[0]
+
+	require.NoError(t, consumer.handle(context.Background(), msg))
+
+	got, err := walletRepo.FindByID(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.Equal(t, mustMoney(t, "70.00"), got.Balance())
+
+	// Simulate "crashed before delete": force the message visible again
+	// immediately instead of waiting out a real visibility timeout.
+	_, err = client.ChangeMessageVisibility(context.Background(), &awssqs.ChangeMessageVisibilityInput{
+		QueueUrl: aws.String(queueURL), ReceiptHandle: msg.ReceiptHandle, VisibilityTimeout: 0,
+	})
+	require.NoError(t, err)
+
+	redelivered, err := client.ReceiveMessage(context.Background(), &awssqs.ReceiveMessageInput{
+		QueueUrl: aws.String(queueURL), MaxNumberOfMessages: 1, WaitTimeSeconds: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, redelivered.Messages, 1)
+	assert.Equal(t, aws.ToString(msg.MessageId), aws.ToString(redelivered.Messages[0].MessageId))
+
+	require.NoError(t, consumer.handle(context.Background(), redelivered.Messages[0]))
+
+	final, err := walletRepo.FindByID(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.Equal(t, mustMoney(t, "70.00"), final.Balance(), "redelivery must not process the bet a second time")
+
+	entries, err := walletRepo.AllLedgerEntries(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "exactly one debit despite two deliveries")
+
+	_, _ = client.DeleteMessage(context.Background(), &awssqs.DeleteMessageInput{
+		QueueUrl: aws.String(queueURL), ReceiptHandle: redelivered.Messages[0].ReceiptHandle,
+	})
+}
+
 // TestPublisherAndOutboxWorkerOverRealSQS creates a wallet with a positive
 // opening balance (which queues real outbox entries the normal way, via
 // app.WalletCreator), drains them with a real OutboxWorker publishing
@@ -212,4 +299,99 @@ func TestPublisherAndOutboxWorkerOverRealSQS(t *testing.T) {
 	}
 
 	assert.ElementsMatch(t, []string{"WagerTransactionProcessed", "WalletBalanceChanged"}, publishedEventTypes)
+}
+
+// TestOutboxRecoveryAfterAbandonedPublish is the mandatory "dois publishers
+// disputando o mesmo outbox" scenario: publisher 1 claims an entry, really
+// publishes it to real SQS, then "crashes" (its transaction is rolled back
+// instead of committed — the row lock from FindDueForUpdate is released,
+// exactly as it would be if the process had actually died here, per
+// ARCHITECTURE.md's "Mensageria (SQS)"). Publisher 2 then picks up the same
+// still-PENDING entry and completes normally. At-least-once delivery means
+// the message may genuinely reach the queue twice (or SQS FIFO's own
+// dedup — same MessageDeduplicationId within its window — may collapse it
+// to once; either is fine) — what must never happen is a second, distinct
+// eventId for the same logical event.
+func TestOutboxRecoveryAfterAbandonedPublish(t *testing.T) {
+	client := testSQSClient(t)
+	queueURL := createTestFIFOQueue(t, client, "outbox-recovery-test")
+	pool := testPool(t)
+
+	outboxRepo := postgres.NewOutboxRepository(pool)
+	txManager := postgres.NewTxManager(pool)
+	publisher := NewPublisher(client, queueURL)
+
+	// Drain any PENDING backlog this session's other tests left in Postgres
+	// first, so FindDueForUpdate below is guaranteed to claim the entry this
+	// test itself creates, not some unrelated leftover row — same reasoning
+	// as internal/postgres's drainOutboxBacklog.
+	drainWorker := app.NewOutboxWorker(outboxRepo, publisher, txManager, time.Second)
+	for i := 0; i < 10000; i++ {
+		processed, err := drainWorker.RunOnce(context.Background())
+		require.NoError(t, err)
+		if !processed {
+			break
+		}
+	}
+
+	entry, err := outbox.NewEntry(outbox.NewEntryInput{
+		AggregateType: "Wallet", AggregateID: uuid.New(),
+		EventType: "WalletBalanceChanged", Payload: []byte(`{"test":true}`), OccurredAt: time.Now(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, outboxRepo.SaveAll(context.Background(), entry))
+
+	// Publisher 1: claims the row, really publishes it, then "crashes" —
+	// the forced error means WithinTx rolls back, so the claim (and any
+	// status change) never actually takes effect; the entry stays PENDING.
+	errSimulatedCrash := errors.New("simulated crash before commit")
+	txErr := txManager.WithinTx(context.Background(), func(ctx context.Context) error {
+		claimed, err := outboxRepo.FindDueForUpdate(ctx)
+		require.NoError(t, err)
+		require.Equal(t, entry.ID(), claimed.ID())
+		require.NoError(t, publisher.Publish(ctx, claimed))
+		return errSimulatedCrash
+	})
+	require.ErrorIs(t, txErr, errSimulatedCrash)
+
+	// Publisher 2: the entry is still PENDING, so a fresh worker claims and
+	// completes it normally.
+	worker := app.NewOutboxWorker(outboxRepo, publisher, txManager, time.Second)
+	processed, err := worker.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.True(t, processed)
+
+	// The drain step above just published this session's entire unrelated
+	// backlog to this same fresh queue too — filter down to deliveries of
+	// this test's own entry specifically, same reasoning as
+	// TestPublisherAndOutboxWorkerOverRealSQS filtering by aggregateId.
+	deliveriesOfThisEvent := 0
+	otherEventIDsSeen := map[uuid.UUID]bool{}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := client.ReceiveMessage(context.Background(), &awssqs.ReceiveMessageInput{
+			QueueUrl: aws.String(queueURL), MaxNumberOfMessages: 10, WaitTimeSeconds: 2,
+		})
+		require.NoError(t, err)
+		if len(out.Messages) == 0 {
+			break
+		}
+		for _, msg := range out.Messages {
+			var envelope eventEnvelope
+			require.NoError(t, json.Unmarshal([]byte(aws.ToString(msg.Body)), &envelope))
+			if envelope.AggregateID == entry.AggregateID() {
+				if envelope.EventID == entry.ID() {
+					deliveriesOfThisEvent++
+				} else {
+					otherEventIDsSeen[envelope.EventID] = true
+				}
+			}
+			_, _ = client.DeleteMessage(context.Background(), &awssqs.DeleteMessageInput{
+				QueueUrl: aws.String(queueURL), ReceiptHandle: msg.ReceiptHandle,
+			})
+		}
+	}
+
+	assert.GreaterOrEqual(t, deliveriesOfThisEvent, 1, "expected at least the successful publish to land on the queue")
+	assert.Empty(t, otherEventIDsSeen, "no other eventId should ever be minted for this same logical event")
 }

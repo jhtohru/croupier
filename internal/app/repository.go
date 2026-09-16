@@ -19,9 +19,18 @@ var (
 	ErrWalletAlreadyExists      = errors.New("wallet already exists")
 	ErrLedgerEntryNotFound      = errors.New("ledger entry not found")
 	ErrWagerTransactionNotFound = errors.New("wager transaction not found")
-	ErrIdempotencyConflict      = errors.New("idempotency conflict")
-	ErrInboxEntryNotFound       = errors.New("inbox entry not found")
-	ErrOutboxEntryNotFound      = errors.New("outbox entry not found")
+	// ErrWagerTransactionAlreadyExists means a Save lost a race to insert
+	// (providerId, externalTransactionId) — another concurrent Submit for
+	// the exact same key already committed its row first. WagerSubmitter is
+	// the only caller that should ever see this: it catches it and retries
+	// as an ordinary idempotent replay against the winner's row, so no
+	// caller of Submit ever observes this error directly (see the Fase 12
+	// note in TODO.md — 50 concurrent identical submissions must resolve to
+	// one processed transaction and 49 clean replays, not 49 errors).
+	ErrWagerTransactionAlreadyExists = errors.New("wager transaction already exists")
+	ErrIdempotencyConflict           = errors.New("idempotency conflict")
+	ErrInboxEntryNotFound            = errors.New("inbox entry not found")
+	ErrOutboxEntryNotFound           = errors.New("outbox entry not found")
 )
 
 // TxManager coordinates atomicity across repositories: repository calls made

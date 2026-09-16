@@ -79,7 +79,27 @@ func (ws *WagerSubmitter) Submit(ctx context.Context, input SubmitWagerTransacti
 		return ws.replay(ctx, existing, candidate)
 	}
 
-	return ws.process(ctx, candidate)
+	result, err := ws.process(ctx, candidate)
+	if errors.Is(err, ErrWagerTransactionAlreadyExists) {
+		// This check-then-insert is inherently racy under real concurrency
+		// (the check above and process's own insert aren't one atomic step)
+		// — losing that race isn't a real conflict, just a concurrent
+		// Submit for the identical key that committed first. Replay against
+		// whatever it wrote, exactly like the ordinary path above would
+		// have if the check had run a moment later. The mandatory 50-
+		// concurrent-identical-submissions scenario (TODO.md, Fase 12)
+		// depends on this: one caller gets a fresh PROCESSED result, every
+		// other one gets a clean replay, never a raw insert error.
+		winner, ferr := ws.wagers.FindByProviderAndExternalID(ctx, input.ProviderID, input.ExternalTransactionID)
+		if ferr != nil {
+			return nil, ferr
+		}
+		return ws.replay(ctx, winner, candidate)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // replay handles a resubmission of an (providerId, externalTransactionId)

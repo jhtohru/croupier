@@ -98,6 +98,8 @@ Ambas exigem referência obrigatória (`ErrMissingReference` se ausente) e rever
 - Kinds sem movimento de saldo (`LOSS`, ou qualquer transação que terminou `PENDING_REFERENCE`/`REJECTED`) não têm `LedgerEntry` — nesse caso o replay cai de volta pro saldo atual da wallet (é a melhor resposta disponível, já que não existe um snapshot histórico pra essas).
 - A validação "header `Idempotency-Key` bate com `providerId:externalTransactionId` do corpo" fica na camada HTTP (Fase 7) — `Submit` deriva a chave diretamente dos campos do domínio, não recebe um header separado pra comparar.
 
+**A checagem inicial (`FindByProviderAndExternalID` antes de processar) é check-then-act, deliberadamente não atômica com o processamento — e isso só é seguro por causa do que acontece quando duas goroutines perdem essa corrida ao mesmo tempo**: até a Fase 12, nada garantia isso de verdade. Sob concorrência real (50 submissões idênticas simultâneas, `TestWagerSubmitterConcurrentDuplicateSubmissions`), várias goroutines passam pela checagem antes de qualquer uma commitar — só uma vence a inserção em `wager_transactions` (protegida pela constraint `wager_transactions_provider_external_unique`, já existente desde a Fase 6); as outras recebiam, antes da correção, o erro cru do Postgres (`23505`) em vez de um replay. Corrigido em duas pontas: `WagerRepository.Save` traduz essa violação pra `app.ErrWagerTransactionAlreadyExists` (mesmo padrão de `wallets_player_currency_unique` → `app.ErrWalletAlreadyExists`), e `Submit` captura esse erro e tenta de novo como um replay comum contra a linha que venceu — quem perde a corrida de inserção nunca vê um erro, só o mesmo resultado que veria se tivesse chegado um instante depois.
+
 ## Referências pendentes (PENDING_REFERENCE)
 
 `REFUND`/`ROLLBACK` resolvem a referência buscando por `(providerId, referenceExternalTransactionId)` antes de aplicar qualquer movimento:
@@ -121,7 +123,7 @@ Ambas exigem referência obrigatória (`ErrMissingReference` se ausente) e rever
 
 **Por que pessimista, e não otimista com retry**: a alternativa exigiria reestruturar `WagerSubmitter.process` (e potencialmente `WalletCreator.Create`) com um loop de retry em cima de código já escrito e testado contra fakes — risco desnecessário sob prazo apertado. Lock pessimista, ao contrário, é uma mudança inteiramente contida na camada de repositório mais um ajuste estrutural único: mover a leitura da wallet pra dentro da transação em `WagerSubmitter.process` (antes ela lia fora, mutava em memória, e só a escrita final acontecia dentro de `WithinTx` — não protegia nada contra corrida, já que duas goroutines podiam ler o mesmo saldo antes de qualquer uma escrever).
 
-**Serialização é por linha, não global**: `FOR UPDATE` trava só a linha da wallet específica sendo lida — duas requisições concorrentes contra **wallets diferentes** continuam paralelas, sem nenhum lock compartilhado entre elas.
+**Serialização é por linha, não global**: `FOR UPDATE` trava só a linha da wallet específica sendo lida — duas requisições concorrentes contra **wallets diferentes** continuam paralelas, sem nenhum lock compartilhado entre elas. Provado diretamente contra o primitivo de lock (Fase 12, `TestWalletRepositoryFindByIDLocksPerRowNotGlobally`): segura o lock da wallet A aberto de propósito e confirma que uma leitura concorrente da wallet B nunca bloqueia atrás dele — sem depender de heurística de tempo.
 
 **Verificado contra Postgres real**, não só por leitura de código: o cenário obrigatório do desafio (wallet com 100.00 BRL recebendo duas apostas concorrentes de 80.00) foi rodado com goroutines de verdade contra um Postgres real via `docker-compose.yml` — resultado consistente em 10 execuções seguidas: uma `PROCESSED`, uma `REJECTED` (`FailureCodeInsufficientBalance`), saldo final 20.00 BRL, exatamente um `LedgerEntry`. Teste em `internal/postgres/integration_test.go` (`TestWagerSubmitterConcurrentBets`, atrás de `//go:build integration`).
 
@@ -215,7 +217,7 @@ A mensagem só é removida da fila (`DeleteMessage`) depois que `handle` retorna
 
 **Decisão de infraestrutura de teste que vale registrar**: os testes de integração deste pacote criam uma fila FIFO efêmera própria por execução (`CreateQueue`/`DeleteQueue` no `t.Cleanup`), em vez de reusar as filas de produção provisionadas pelo `init-queues.sh`. Motivo encontrado por observação direta, não suposição: compartilhar uma fila entre muitas execuções ao longo de uma sessão de testes deixou o LocalStack pouco confiável (mensagens novas às vezes nunca ficavam visíveis pra `ReceiveMessage`); a correção óbvia — `PurgeQueue` antes de cada execução — piorou o problema em vez de resolver, porque `PurgeQueue` é assíncrono mesmo na AWS real ("a deleção tipicamente completa em até 60 segundos", pela própria documentação da API), e um purge seguido imediatamente de um `SendMessage`+`ReceiveMessage` no mesmo processo reproduzia a falha de forma consistente. Fila efêmera dedicada não tem histórico nenhum pra purgar, e evita a classe inteira de problema.
 
-**Retry/DLQ não verificado de ponta a ponta ainda**: forçar uma mensagem a falhar as 5 tentativas (`maxReceiveCount`) e observar ela cair de fato na `wager-transactions-dlq.fifo` fica pra Fase 12, que já tem cenário obrigatório dedicado pra isso — junto com "matar o consumer no meio e verificar redelivery" contra infraestrutura real (hoje só coberto por unit test com fake, `TestConsumerHandle/redelivery_of_already-completed_work_does_not_resubmit`, que simula exatamente esse cenário sem precisar matar um processo de verdade).
+**Redelivery contra SQS real** (não só unit test com fake) verificado na Fase 12 — `TestConsumerRedeliveryAfterCommitBeforeDelete`, ver "Instruções de teste" → "Simulando falhas". **DLQ ainda não verificada de ponta a ponta**: forçar uma mensagem a falhar as 5 tentativas (`maxReceiveCount`) e observar ela cair de fato na `wager-transactions-dlq.fifo` é o único item desta seção que ficou pra trás — exigiria fazer `Submit` falhar deterministicamente 5 vezes seguidas pra mesma mensagem (ex.: apontar temporariamente pra um Postgres fora do ar), o que não se encaixou no formato dos outros testes desta suíte sem introduzir infraestrutura só pra esse teste.
 
 ## Autenticação e Autorização
 
@@ -235,7 +237,7 @@ A mensagem só é removida da fila (`DeleteMessage`) depois que `handle` retorna
 
 ## Composição (Uber Fx) e ciclo de vida
 
-**`cmd/croupier` é o único lugar do projeto que conhece tipo concreto de infraestrutura.** Todo outro pacote (`internal/app`, `internal/httpapi`, `internal/sqs`) só depende de interface — é aqui, e só aqui, que `*postgres.WalletRepository` vira o valor injetado onde `app.WalletRepository` é esperado, que `*auth.Verifier` vira `Deps.Auth`, etc. Migrations rodam **antes** de montar o `fx.App` (`runMigrations` em `cmd/croupier/migrate.go`, síncrono, conexão `database/sql` própria, separada do `pgxpool.Pool` do resto da aplicação) — nada aceita tráfego contra um schema desatualizado.
+**`cmd/croupier` é o único lugar do projeto que conhece tipo concreto de infraestrutura.** Todo outro pacote (`internal/app`, `internal/httpapi`, `internal/sqs`) só depende de interface — é aqui, e só aqui, que `*postgres.WalletRepository` vira o valor injetado onde `app.WalletRepository` é esperado, que `*auth.Verifier` vira `Deps.Auth`, etc. Migrations rodam **antes** de montar o `fx.App` (`postgres.ApplyMigrations`, síncrono, conexão `database/sql` própria, separada do `pgxpool.Pool` do resto da aplicação) — nada aceita tráfego contra um schema desatualizado. `ApplyMigrations` mora em `internal/postgres`, não em `cmd/croupier`, precisamente pra poder ser reusada por `internal/testdb` sem que este importasse `package main` (Go não permite importar `main`) — ver "Testes de integração" abaixo.
 
 **Providers concretos vs. interface** (`cmd/croupier/providers.go`): `postgres.NewWalletRepository` retorna `*postgres.WalletRepository`, não `app.WalletRepository` — se eu desse `fx.Provide(postgres.NewWalletRepository)` direto, o Fx registraria o tipo concreto no grafo, e `app.NewWalletCreator` (que pede `app.WalletRepository` como parâmetro) nunca encontraria um valor compatível, porque o Fx casa por tipo exato, não por satisfação estrutural de interface. A correção são 5 funções pequenas (`provideWalletRepository`, `provideWagerRepository`, ...) cuja única função é declarar o tipo de retorno como a interface do `app`, não o ponteiro concreto — depois disso, `fx.Provide(app.NewWalletCreator)` funciona direto, sem precisar de `fx.Annotate`/`fx.As`.
 
@@ -269,12 +271,78 @@ _(Fase 13)_
 
 ### Testes de integração
 
-_(Fase 13)_
+**Cada pacote com testes de integração contra Postgres (`internal/postgres`, `internal/httpapi`, `internal/sqs`, `cmd/croupier`) tem seu próprio banco de dados descartável, recriado do zero a cada execução** — nunca o `croupier` que o serviço `app` do compose usa. Um `TestMain` dedicado por pacote (`testmain_test.go`, arquivo próprio em vez de entrar arbitrariamente num dos arquivos de teste já existentes) chama `testdb.Postgres("croupier_test_<pacote>")` (`internal/testdb`): dropa (se existir), recria, aplica todas as migrations via `postgres.ApplyMigrations` e devolve a DSN, que o `TestMain` põe em `TEST_DATABASE_URL` antes de rodar os testes do pacote (`m.Run()`). Cada pacote usa um nome de banco distinto (`croupier_test_postgres`, `croupier_test_httpapi`, `croupier_test_sqs`, `croupier_test_cmdcroupier`) porque `go test ./...` roda os binários de pacotes diferentes em paralelo por padrão — bancos com nomes distintos evitam qualquer disputa entre eles sem precisar de coordenação.
+
+**Motivo, encontrado por um bug real, não hipotético**: antes desta mudança, todo teste de integração apontava pro mesmo banco `croupier` que o `docker compose up app` também usa. Isso causava dois problemas distintos, ambos observados de verdade nesta sessão:
+1. Um `app` rodando ao mesmo tempo dos testes tem seu próprio `OutboxWorker` fazendo poll da tabela `outbox` na cadência dele — competindo de verdade por linhas com os testes de concorrência do outbox (`TestOutboxRepositoryFindDueForUpdateSkipsLockedRows`), causando falha intermitente sem nada errado no código sendo testado. A instrução anterior era "rode com `docker compose stop app`" — um requisito frágil, fácil de esquecer, que só escondia o problema em vez de eliminá-lo.
+2. Sessões de teste sucessivas acumulavam entradas de outbox de sessões anteriores no mesmo banco compartilhado, exigindo um `drainOutboxBacklog` manual antes de testes como `TestOutboxRecoveryAfterAbandonedPublish` pra garantir que só as entradas daquela execução específica importassem.
+
+Um banco novo por execução de pacote elimina os dois de raiz: não existe outro processo (nem o `app`, nem uma sessão de teste anterior) tocando o mesmo banco, então os testes podem rodar com o `app` **de pé**, sem passo manual nenhum — confirmado rodando as quatro suítes várias vezes com `docker compose up app` deliberadamente ligado, todas passando. Isso não elimina a necessidade de isolamento **entre** funções de teste do mesmo pacote (`drainOutboxBacklog` e afins continuam existindo e continuam necessários — várias `Test...` de um mesmo pacote ainda compartilham o único banco daquela execução), só o isolamento **entre execuções** de `go test` e contra o `app` de verdade.
+
+**Por que um banco novo por execução de pacote, e não por função de teste individual** (transação por teste com rollback, ou schema novo por teste): algumas suítes (`TestOutboxRepositoryFindDueForUpdateSkipsLockedRows`, `TestConcurrentBetsAcrossMultipleAppInstances`) dependem de comportamento real de lock/transação entre goroutines concorrentes — envolver cada teste numa transação englobante quebraria exatamente esse comportamento (locks e `SKIP LOCKED` não fazem sentido dentro de uma transação que nunca commita de verdade). Recriar schema a cada função individual seria isolamento correto, mas lento demais pra valer a pena frente ao ganho.
+
+**`TestMain` é por pacote/binário de teste, não compartilhável entre pacotes** — restrição do próprio `go test` (cada pacote com a tag `integration` compila num binário de teste próprio). Por isso a lógica de bootstrap do banco vive uma vez só, reusável, em `internal/testdb` (que importa `internal/postgres` — nunca o contrário), e cada pacote só tem um `testmain_test.go` fino chamando essa lógica com seu próprio nome de banco.
+
+`internal/auth` não precisa de `TestMain`/banco de teste — seus testes de integração (`verifier_test.go`) só exercitam Keycloak, nunca Postgres.
 
 ### Simulando múltiplas instâncias
 
-_(Fase 12)_
+`TestConcurrentBetsAcrossMultipleAppInstances` (`internal/postgres`) é a versão automatizada: três `*app.WagerSubmitter` totalmente independentes (cada um com seu próprio `*pgxpool.Pool`) disputando a mesma wallet — exatamente o que três processos `cmd/croupier` separados teriam, sem nenhum estado compartilhado em processo. Pra simular de verdade com processos separados via Docker (não só em teste Go):
+```sh
+docker compose up -d --build --scale app=3 app
+docker compose ps app   # três containers croupier-app-1/2/3, todos contra o mesmo Postgres
+```
+Não dá pra publicar todos na mesma porta do host (`APP_PORT` colidiria) — pra esse teste manual, deixe o compose escolher portas efêmeras (`docker compose port app <N> 8081` mostra qual) ou teste só a nível de Postgres/logs (cada instância loga seu próprio start/stop de forma independente, confirmando que não há coordenação nenhuma entre elas além do banco).
 
 ### Simulando falhas (kill, restart, interrupção)
 
-_(Fase 12)_
+**Reiniciar o app com trabalho pendente** — passos reproduzíveis, exatamente como verificado nesta sessão (ver TODO.md, Fase 12):
+```sh
+# 1. Cria uma wallet e submete um REFUND referenciando um BET que ainda não existe
+INTERNAL_TOKEN=$(curl -s -X POST http://localhost:8080/realms/croupier/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=internal-service -d client_secret=internal-service-secret \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+PROVIDER_TOKEN=$(curl -s -X POST http://localhost:8080/realms/croupier/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=provider-a -d client_secret=provider-a-secret \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+WALLET_ID=$(curl -s -X POST localhost:8081/wallets -H "Authorization: Bearer $INTERNAL_TOKEN" \
+  -d '{"playerId":"33333333-3333-3333-3333-333333333333","initialBalance":{"amount":"100.00","currency":"BRL"}}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+curl -s -X POST localhost:8081/wagering/transactions -H "Authorization: Bearer $PROVIDER_TOKEN" \
+  -d "{\"externalTransactionId\":\"refund-1\",\"playerId\":\"33333333-3333-3333-3333-333333333333\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-1\",\"gameId\":\"game-1\",\"kind\":\"REFUND\",\"amount\":{\"amount\":\"10.00\",\"currency\":\"BRL\"},\"referenceExternalTransactionId\":\"bet-1\"}"
+# → status "PENDING_REFERENCE"
+
+# 2. Mata o app
+docker compose stop app
+
+# 3. Confirma direto no Postgres que nada se perdeu
+docker exec croupier-postgres-1 psql -U croupier -d croupier -c \
+  "SELECT status, pending_reference_attempts FROM wager_transactions WHERE external_transaction_id = 'refund-1';"
+# → ainda PENDING_REFERENCE, attempts preservado
+
+# 4. Reinicia
+docker compose up -d app
+
+# 5. Submete o BET que faltava
+curl -s -X POST localhost:8081/wagering/transactions -H "Authorization: Bearer $PROVIDER_TOKEN" \
+  -d "{\"externalTransactionId\":\"bet-1\",\"playerId\":\"33333333-3333-3333-3333-333333333333\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-1\",\"gameId\":\"game-1\",\"kind\":\"BET\",\"amount\":{\"amount\":\"10.00\",\"currency\":\"BRL\"}}"
+
+# 6. Reenvia o mesmo BET — idempotência tem que ter sobrevivido ao restart
+curl -s -X POST localhost:8081/wagering/transactions -H "Authorization: Bearer $PROVIDER_TOKEN" \
+  -d "{\"externalTransactionId\":\"bet-1\",\"playerId\":\"33333333-3333-3333-3333-333333333333\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-1\",\"gameId\":\"game-1\",\"kind\":\"BET\",\"amount\":{\"amount\":\"10.00\",\"currency\":\"BRL\"}}"
+# → "idempotentReplay": true, mesmo saldo de antes
+
+# 7. Espera até 5s (intervalo padrão de poll) e confere que o REFUND resolveu sozinho
+docker exec croupier-postgres-1 psql -U croupier -d croupier -c \
+  "SELECT status FROM wager_transactions WHERE external_transaction_id = 'refund-1';"
+# → PROCESSED, sem nenhuma chamada manual pro resolver
+
+# 8. Reconciliação final
+curl -s -X POST localhost:8081/wallets/$WALLET_ID/reconciliation -H "Authorization: Bearer $INTERNAL_TOKEN"
+# → "consistent": true
+```
+Resultado real desta sessão: todos os 8 passos se comportaram exatamente como descrito — trabalho pendente sobrevive ao restart, o resolvedor de `PENDING_REFERENCE` do processo novo retoma sozinho sem intervenção, idempotência (checada via banco, não memória) sobrevive, saldo consistente no final.
+
+**Interromper consumer após commit, antes de remover da fila** — `TestConsumerRedeliveryAfterCommitBeforeDelete` (`internal/sqs`) automatiza isso contra SQS real: processa a mensagem (commit incluso), força ela ficar visível de novo (`ChangeMessageVisibility` com timeout 0, em vez de esperar os 30s reais), confirma que a redelivery de verdade (uma segunda `ReceiveMessage`, não construída à mão) não reprocessa. Pra simular com o processo de verdade sendo morto no meio (não só o handler): publique uma mensagem, mate o container (`docker compose kill app`) bem depois do log de commit mas antes do log de delete (difícil de cronometrar de fora — na prática, `SIGKILL` a qualquer momento e reiniciar já basta, porque a mensagem só é deletada depois do commit, então kill a qualquer momento é seguro por construção, não só nessa janela estreita).
+
+**Dois publishers disputando o mesmo outbox** — `TestOutboxRecoveryAfterAbandonedPublish` (`internal/sqs`) automatiza contra Postgres+SQS reais: publisher 1 publica de verdade e "crasha" (transação nunca commitada — o lock da linha, que é o que garante exclusão mútua entre publishers concorrentes, some sozinho), publisher 2 reclama a mesma linha `PENDING` e completa. Ver ARCHITECTURE.md → "Mensageria (SQS)" pra o raciocínio completo de por que isso não precisa de lease/`claimedUntil`.
