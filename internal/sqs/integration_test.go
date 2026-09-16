@@ -192,7 +192,7 @@ func TestConsumerRedeliveryAfterCommitBeforeDelete(t *testing.T) {
 	require.Len(t, out.Messages, 1)
 	msg := out.Messages[0]
 
-	require.NoError(t, consumer.handle(context.Background(), msg))
+	require.NoError(t, consumer.handle(context.Background(), msg, "test-correlation-id"))
 
 	got, err := walletRepo.FindByID(context.Background(), w.ID())
 	require.NoError(t, err)
@@ -212,7 +212,7 @@ func TestConsumerRedeliveryAfterCommitBeforeDelete(t *testing.T) {
 	require.Len(t, redelivered.Messages, 1)
 	assert.Equal(t, aws.ToString(msg.MessageId), aws.ToString(redelivered.Messages[0].MessageId))
 
-	require.NoError(t, consumer.handle(context.Background(), redelivered.Messages[0]))
+	require.NoError(t, consumer.handle(context.Background(), redelivered.Messages[0], "test-correlation-id"))
 
 	final, err := walletRepo.FindByID(context.Background(), w.ID())
 	require.NoError(t, err)

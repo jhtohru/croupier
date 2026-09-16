@@ -56,7 +56,7 @@ func TestConsumerHandle(t *testing.T) {
 		body := testMessageBody(t)
 		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(body), ReceiptHandle: aws.String("rh-1")}
 
-		err := c.handle(context.Background(), msg)
+		err := c.handle(context.Background(), msg, "test-correlation-id")
 
 		require.NoError(t, err)
 		require.Len(t, submitter.calls, 1)
@@ -74,12 +74,12 @@ func TestConsumerHandle(t *testing.T) {
 		body := testMessageBody(t)
 		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(body), ReceiptHandle: aws.String("rh-1")}
 
-		require.NoError(t, c.handle(context.Background(), msg))
+		require.NoError(t, c.handle(context.Background(), msg, "test-correlation-id"))
 		require.Len(t, submitter.calls, 1)
 
 		// Simulates exactly the "interrupted after commit, before delete"
 		// scenario: SQS redelivers the same message, Submit must not run again.
-		err := c.handle(context.Background(), msg)
+		err := c.handle(context.Background(), msg, "test-correlation-id")
 
 		require.NoError(t, err)
 		assert.Len(t, submitter.calls, 1)
@@ -99,7 +99,7 @@ func TestConsumerHandle(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, inboxRepo.Save(context.Background(), entry))
 
-		err = c.handle(context.Background(), msg)
+		err = c.handle(context.Background(), msg, "test-correlation-id")
 
 		require.NoError(t, err)
 		assert.Len(t, submitter.calls, 1)
@@ -114,10 +114,10 @@ func TestConsumerHandle(t *testing.T) {
 		c := &Consumer{consumerName: consumerName, submitter: submitter, inbox: inboxRepo}
 
 		first := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t)), ReceiptHandle: aws.String("rh-1")}
-		require.NoError(t, c.handle(context.Background(), first))
+		require.NoError(t, c.handle(context.Background(), first, "test-correlation-id"))
 
 		different := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t) + " "), ReceiptHandle: aws.String("rh-2")}
-		err := c.handle(context.Background(), different)
+		err := c.handle(context.Background(), different, "test-correlation-id")
 
 		assert.Error(t, err)
 		assert.Len(t, submitter.calls, 1) // the second, mismatched body never reaches Submit
@@ -129,7 +129,7 @@ func TestConsumerHandle(t *testing.T) {
 		c := &Consumer{consumerName: consumerName, submitter: submitter, inbox: inboxRepo}
 
 		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String("not json"), ReceiptHandle: aws.String("rh-1")}
-		err := c.handle(context.Background(), msg)
+		err := c.handle(context.Background(), msg, "test-correlation-id")
 
 		assert.Error(t, err)
 		assert.Empty(t, submitter.calls)
@@ -141,7 +141,7 @@ func TestConsumerHandle(t *testing.T) {
 		c := &Consumer{consumerName: consumerName, submitter: submitter, inbox: inboxRepo}
 
 		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t)), ReceiptHandle: aws.String("rh-1")}
-		err := c.handle(context.Background(), msg)
+		err := c.handle(context.Background(), msg, "test-correlation-id")
 
 		assert.Error(t, err)
 		got, err := inboxRepo.FindByConsumerAndMessage(context.Background(), consumerName, "msg-1")

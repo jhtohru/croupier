@@ -12,6 +12,21 @@ import (
 	"github.com/jhtohru/croupier/internal/wager"
 )
 
+// wagerOutcome classifies a submission result for logs/metrics — mirrors
+// internal/sqs's identical helper (kept separate rather than shared, same
+// reasoning as this package's own copy of the request/response DTOs: no
+// reason for either package to depend on the other for three lines of
+// logic).
+func wagerOutcome(result *app.SubmitWagerTransactionResult) string {
+	if result.IdempotentReplay {
+		return "replay"
+	}
+	if result.Transaction == nil {
+		return "unknown"
+	}
+	return strings.ToLower(string(result.Transaction.Status()))
+}
+
 type wagerTransactionResponse struct {
 	ID                             uuid.UUID         `json:"id"`
 	Status                         wager.TxStatus    `json:"status"`
@@ -112,8 +127,11 @@ func (h *handler) submitWagerTransaction(w http.ResponseWriter, r *http.Request)
 		ReferenceExternalTransactionID: req.ReferenceExternalTransactionID,
 	})
 	if err != nil {
-		writeError(r.Context(), w, err)
+		writeError(r.Context(), w, err, "walletId", req.WalletID, "externalTransactionId", req.ExternalTransactionID)
 		return
+	}
+	if h.deps.Metrics != nil {
+		h.deps.Metrics.ObserveWagerSubmission(string(req.Kind), wagerOutcome(result))
 	}
 	writeJSON(w, http.StatusOK, submitWagerTransactionResponse{
 		Transaction:      newWagerTransactionResponse(result.Transaction),
@@ -134,7 +152,7 @@ func (h *handler) getWagerTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, err := h.deps.WagerTransactionGetter.Get(r.Context(), id)
 	if err != nil {
-		writeError(r.Context(), w, err)
+		writeError(r.Context(), w, err, "transactionId", id)
 		return
 	}
 	writeJSON(w, http.StatusOK, newWagerTransactionResponse(tx))
@@ -161,7 +179,7 @@ func (h *handler) getWagerTransactionByProvider(w http.ResponseWriter, r *http.R
 	}
 	tx, err := h.deps.WagerTransactionGetter.GetByProvider(r.Context(), providerID, externalTransactionID)
 	if err != nil {
-		writeError(r.Context(), w, err)
+		writeError(r.Context(), w, err, "externalTransactionId", externalTransactionID)
 		return
 	}
 	writeJSON(w, http.StatusOK, newWagerTransactionResponse(tx))

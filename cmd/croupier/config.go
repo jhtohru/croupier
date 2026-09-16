@@ -17,8 +17,10 @@ type Config struct {
 	SQSEndpoint                string
 	AWSRegion                  string
 	WagerTransactionsQueueName string
+	WagerTransactionsDLQName   string
 	WalletEventsQueueName      string
 	SQSConsumerName            string
+	DLQDepthPollInterval       time.Duration
 
 	KeycloakIssuerURL string
 
@@ -74,6 +76,10 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	dlqDepthPollInterval, err := getenvDuration("DLQ_DEPTH_POLL_INTERVAL", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		PostgresDSN: fmt.Sprintf(
@@ -84,8 +90,10 @@ func LoadConfig() (*Config, error) {
 		SQSEndpoint:                getenv("SQS_ENDPOINT", "http://localhost:4566"),
 		AWSRegion:                  getenv("AWS_REGION", "us-east-1"),
 		WagerTransactionsQueueName: getenv("WAGER_TRANSACTIONS_QUEUE_NAME", "wager-transactions.fifo"),
+		WagerTransactionsDLQName:   getenv("WAGER_TRANSACTIONS_DLQ_NAME", "wager-transactions-dlq.fifo"),
 		WalletEventsQueueName:      getenv("WALLET_EVENTS_QUEUE_NAME", "wallet-events.fifo"),
 		SQSConsumerName:            getenv("SQS_CONSUMER_NAME", "wager-transactions-consumer"),
+		DLQDepthPollInterval:       dlqDepthPollInterval,
 
 		KeycloakIssuerURL: getenv("KEYCLOAK_ISSUER_URL", "http://localhost:8080/realms/croupier"),
 

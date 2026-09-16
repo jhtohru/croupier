@@ -17,7 +17,19 @@ import (
 	"github.com/jhtohru/croupier/internal/postgres"
 )
 
+// configureLogging switches the process-wide default logger to JSON output
+// (Fase 11) — every slog call already made throughout the codebase (main.go,
+// lifecycle.go, internal/httpapi, internal/sqs) starts emitting structured
+// JSON lines with no change needed at any of those call sites, since none of
+// them construct their own *slog.Logger; they all go through slog's package-
+// level functions, which read whatever handler is installed here.
+func configureLogging() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+}
+
 func main() {
+	configureLogging()
+
 	cfg, err := LoadConfig()
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
@@ -52,7 +64,9 @@ func main() {
 			provideConsumer,
 			providePendingReferenceResolver,
 			provideOutboxWorker,
+			provideDLQDepthPoller,
 
+			provideMetrics,
 			provideAuthVerifier,
 			provideReadyChecker,
 			provideHTTPServer,
@@ -62,6 +76,7 @@ func main() {
 			registerConsumer,
 			registerPendingReferenceResolver,
 			registerOutboxWorker,
+			registerDLQDepthPoller,
 		),
 		fx.StartTimeout(cfg.ShutdownTimeout),
 		fx.StopTimeout(cfg.ShutdownTimeout+5*time.Second),

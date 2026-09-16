@@ -23,12 +23,29 @@ type PendingReferenceRetry struct {
 // entered again from PENDING_REFERENCE instead of PENDING. If the reference
 // still can't be found, tx stays PENDING_REFERENCE, and this resolver alone
 // (not WagerSubmitter) decides whether to schedule another attempt or give up.
+// PendingReferenceMetrics lets PendingReferenceResolver report resolution
+// outcomes (Fase 11) — same optional, no-op-when-nil pattern as
+// OutboxMetrics above.
+type PendingReferenceMetrics interface {
+	ObservePendingReferenceResolution(outcome string)
+}
+
 type PendingReferenceResolver struct {
 	wagers      WagerRepository
 	submitter   *WagerSubmitter
 	maxAttempts int
 	ttl         time.Duration
 	backoffBase time.Duration
+	metrics     PendingReferenceMetrics
+}
+
+// PendingReferenceResolverOption customizes a PendingReferenceResolver built
+// by NewPendingReferenceResolver — same variadic-option reasoning as
+// OutboxWorkerOption.
+type PendingReferenceResolverOption func(*PendingReferenceResolver)
+
+func WithPendingReferenceMetrics(m PendingReferenceMetrics) PendingReferenceResolverOption {
+	return func(r *PendingReferenceResolver) { r.metrics = m }
 }
 
 func NewPendingReferenceResolver(
@@ -37,14 +54,19 @@ func NewPendingReferenceResolver(
 	maxAttempts int,
 	ttl time.Duration,
 	backoffBase time.Duration,
+	opts ...PendingReferenceResolverOption,
 ) *PendingReferenceResolver {
-	return &PendingReferenceResolver{
+	r := &PendingReferenceResolver{
 		wagers:      wagers,
 		submitter:   submitter,
 		maxAttempts: maxAttempts,
 		ttl:         ttl,
 		backoffBase: backoffBase,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // ResolveDue attempts to resolve every PENDING_REFERENCE transaction whose
@@ -70,6 +92,9 @@ func (r *PendingReferenceResolver) resolveOne(ctx context.Context, now time.Time
 
 	if item.Attempts >= r.maxAttempts || now.Sub(tx.CreatedAt()) >= r.ttl {
 		_, err := r.submitter.reject(ctx, tx, FailureCodeReferenceNotFound)
+		if err == nil && r.metrics != nil {
+			r.metrics.ObservePendingReferenceResolution("expired")
+		}
 		return err
 	}
 
@@ -79,9 +104,15 @@ func (r *PendingReferenceResolver) resolveOne(ctx context.Context, now time.Time
 	if tx.Status() != wager.TxStatusPendingReference {
 		// Resolved one way or another (processed or rejected) — process
 		// already persisted the result; nothing left to schedule.
+		if r.metrics != nil {
+			r.metrics.ObservePendingReferenceResolution("resolved")
+		}
 		return nil
 	}
 
+	if r.metrics != nil {
+		r.metrics.ObservePendingReferenceResolution("still_pending")
+	}
 	next := now.Add(backoffDelay(r.backoffBase, item.Attempts))
 	return r.wagers.ScheduleNextPendingReferenceRetry(ctx, tx.ID(), next)
 }

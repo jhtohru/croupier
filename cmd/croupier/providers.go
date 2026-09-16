@@ -3,16 +3,27 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+	awssqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jhtohru/croupier/internal/app"
 	"github.com/jhtohru/croupier/internal/auth"
 	"github.com/jhtohru/croupier/internal/httpapi"
+	"github.com/jhtohru/croupier/internal/metrics"
 	"github.com/jhtohru/croupier/internal/postgres"
 	croupiersqs "github.com/jhtohru/croupier/internal/sqs"
 )
+
+// provideMetrics builds the one *metrics.Registry the whole process shares —
+// every collector it owns is registered against a private prometheus
+// registry (see internal/metrics), so this is safe to construct exactly
+// once here and hand to every provider below that wants to report something.
+func provideMetrics() *metrics.Registry {
+	return metrics.New()
+}
 
 func providePostgresPool(cfg *Config) (*pgxpool.Pool, error) {
 	return pgxpool.New(context.Background(), cfg.PostgresDSN)
@@ -68,20 +79,58 @@ func provideOutboxPublisher(client *awssqs.Client, cfg *Config) (app.OutboxPubli
 	return croupiersqs.NewPublisher(client, url), nil
 }
 
-func provideConsumer(client *awssqs.Client, submitter *app.WagerSubmitter, inboxRepo app.InboxRepository, cfg *Config) (*croupiersqs.Consumer, error) {
+func provideConsumer(client *awssqs.Client, submitter *app.WagerSubmitter, inboxRepo app.InboxRepository, cfg *Config, reg *metrics.Registry) (*croupiersqs.Consumer, error) {
 	url, err := resolveQueueURL(client, cfg.WagerTransactionsQueueName)
 	if err != nil {
 		return nil, err
 	}
-	return croupiersqs.NewConsumer(client, url, cfg.SQSConsumerName, submitter, inboxRepo), nil
+	return croupiersqs.NewConsumer(client, url, cfg.SQSConsumerName, submitter, inboxRepo, croupiersqs.WithMetrics(reg)), nil
 }
 
-func providePendingReferenceResolver(wagers app.WagerRepository, submitter *app.WagerSubmitter, cfg *Config) *app.PendingReferenceResolver {
-	return app.NewPendingReferenceResolver(wagers, submitter, cfg.PendingReferenceMaxAttempts, cfg.PendingReferenceTTL, cfg.PendingReferenceBackoffBase)
+func providePendingReferenceResolver(wagers app.WagerRepository, submitter *app.WagerSubmitter, cfg *Config, reg *metrics.Registry) *app.PendingReferenceResolver {
+	return app.NewPendingReferenceResolver(wagers, submitter, cfg.PendingReferenceMaxAttempts, cfg.PendingReferenceTTL, cfg.PendingReferenceBackoffBase, app.WithPendingReferenceMetrics(reg))
 }
 
-func provideOutboxWorker(outboxRepo app.OutboxRepository, publisher app.OutboxPublisher, txManager app.TxManager, cfg *Config) *app.OutboxWorker {
-	return app.NewOutboxWorker(outboxRepo, publisher, txManager, cfg.OutboxBackoffBase)
+func provideOutboxWorker(outboxRepo app.OutboxRepository, publisher app.OutboxPublisher, txManager app.TxManager, cfg *Config, reg *metrics.Registry) *app.OutboxWorker {
+	return app.NewOutboxWorker(outboxRepo, publisher, txManager, cfg.OutboxBackoffBase, app.WithOutboxMetrics(reg))
+}
+
+// dlqDepthPoller reads a queue's ApproximateNumberOfMessages and reports it
+// as a metric (Fase 11's DLQ observability) — this is deliberately just a
+// gauge, not a test that a message actually reached the DLQ end-to-end
+// (that gap is documented in ARCHITECTURE.md → "Limitações, interpretações
+// e trabalho incompleto"): polling depth is cheap, reliable, and enough to
+// alert an operator that something is landing there, which is what this
+// metric is for.
+type dlqDepthPoller struct {
+	client   *awssqs.Client
+	queueURL string
+	queue    string
+	metrics  *metrics.Registry
+}
+
+func (p *dlqDepthPoller) poll(ctx context.Context) error {
+	out, err := p.client.GetQueueAttributes(ctx, &awssqs.GetQueueAttributesInput{
+		QueueUrl:       &p.queueURL,
+		AttributeNames: []awssqstypes.QueueAttributeName{awssqstypes.QueueAttributeNameApproximateNumberOfMessages},
+	})
+	if err != nil {
+		return fmt.Errorf("dlq depth poller: %w", err)
+	}
+	depth, err := strconv.ParseFloat(out.Attributes[string(awssqstypes.QueueAttributeNameApproximateNumberOfMessages)], 64)
+	if err != nil {
+		return fmt.Errorf("dlq depth poller: parsing ApproximateNumberOfMessages: %w", err)
+	}
+	p.metrics.SetDLQDepth(p.queue, depth)
+	return nil
+}
+
+func provideDLQDepthPoller(client *awssqs.Client, cfg *Config, reg *metrics.Registry) (*dlqDepthPoller, error) {
+	url, err := resolveQueueURL(client, cfg.WagerTransactionsDLQName)
+	if err != nil {
+		return nil, err
+	}
+	return &dlqDepthPoller{client: client, queueURL: url, queue: cfg.WagerTransactionsDLQName, metrics: reg}, nil
 }
 
 func provideAuthVerifier(cfg *Config) (*auth.Verifier, error) {
@@ -125,6 +174,7 @@ func provideHTTPServer(
 	wagerTransactionGetter *app.WagerTransactionGetter,
 	authVerifier *auth.Verifier,
 	ready *readyChecker,
+	reg *metrics.Registry,
 ) *httpapi.Server {
 	return httpapi.NewServer(httpapi.Deps{
 		WalletCreator:          walletCreator,
@@ -135,5 +185,7 @@ func provideHTTPServer(
 		WagerTransactionGetter: wagerTransactionGetter,
 		Auth:                   authVerifier,
 		Ready:                  ready.check,
+		Metrics:                reg,
+		MetricsHandler:         reg.Handler(),
 	})
 }

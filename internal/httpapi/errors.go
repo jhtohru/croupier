@@ -44,7 +44,14 @@ var validationErrors = []error{
 // opaque 500, so internal error detail (which could include implementation
 // detail or, in a differently-shaped bug, financial data) never reaches the
 // client.
-func writeError(ctx context.Context, w http.ResponseWriter, err error) {
+//
+// extra is an optional list of alternating key/value pairs (walletId,
+// transactionId, ...) a specific handler can attach to the 500 log line —
+// correlationId and providerId are always included on their own since every
+// caller has both available via ctx. Never pass amount/balance/currency
+// here — see Fase 11's "sem payloads financeiros completos" in
+// ARCHITECTURE.md → "Observabilidade".
+func writeError(ctx context.Context, w http.ResponseWriter, err error, extra ...any) {
 	switch {
 	case errors.Is(err, app.ErrWalletNotFound),
 		errors.Is(err, app.ErrWagerTransactionNotFound),
@@ -56,7 +63,13 @@ func writeError(ctx context.Context, w http.ResponseWriter, err error) {
 	case isValidationError(err):
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 	default:
-		slog.ErrorContext(ctx, "unhandled httpapi error", "error", err)
+		args := []any{
+			"error", err,
+			"correlationId", correlationIDFromContext(ctx),
+			"providerId", claimsFromContext(ctx).ProviderID,
+		}
+		args = append(args, extra...)
+		slog.ErrorContext(ctx, "unhandled httpapi error", args...)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 	}
 }

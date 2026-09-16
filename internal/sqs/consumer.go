@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -52,6 +53,16 @@ type wagerTransactionMessage struct {
 	ReferenceExternalTransactionID *string     `json:"referenceExternalTransactionId,omitempty"`
 }
 
+// metricsRecorder is the one method Consumer needs from a metrics backend
+// (Fase 11) — consumer-defined, same pattern as receiveDeleter above;
+// internal/metrics.Registry satisfies this structurally. A nil
+// metricsRecorder is a safe no-op, so every existing call site (including
+// consumer_test.go/integration_test.go) keeps compiling unchanged.
+type metricsRecorder interface {
+	ObserveWagerSubmission(kind, outcome string)
+	ObserveSQSMessage(consumer, result string)
+}
+
 type Consumer struct {
 	client       receiveDeleter
 	queueURL     string
@@ -60,10 +71,19 @@ type Consumer struct {
 	inbox        app.InboxRepository
 	waitTime     int32
 	maxMessages  int32
+	metrics      metricsRecorder
 }
 
-func NewConsumer(client *sqs.Client, queueURL, consumerName string, submitter wagerSubmitter, inboxRepo app.InboxRepository) *Consumer {
-	return &Consumer{
+// ConsumerOption customizes a Consumer built by NewConsumer — same variadic-
+// option reasoning as OutboxWorkerOption in internal/app.
+type ConsumerOption func(*Consumer)
+
+func WithMetrics(m metricsRecorder) ConsumerOption {
+	return func(c *Consumer) { c.metrics = m }
+}
+
+func NewConsumer(client *sqs.Client, queueURL, consumerName string, submitter wagerSubmitter, inboxRepo app.InboxRepository, opts ...ConsumerOption) *Consumer {
+	c := &Consumer{
 		client:       client,
 		queueURL:     queueURL,
 		consumerName: consumerName,
@@ -72,6 +92,10 @@ func NewConsumer(client *sqs.Client, queueURL, consumerName string, submitter wa
 		waitTime:     20,
 		maxMessages:  10,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Run polls the queue until ctx is cancelled, processing each batch
@@ -116,10 +140,21 @@ func (c *Consumer) Run(ctx context.Context) error {
 // message is ever deleted before Submit's underlying transaction commits.
 func (c *Consumer) processMessage(ctx context.Context, msg types.Message) {
 	messageID := aws.ToString(msg.MessageId)
-	if err := c.handle(ctx, msg); err != nil {
+	// SQS has no correlationId of its own — this stands in as the one
+	// identifier tying every log line about processing this specific
+	// delivery together (Fase 11); it's per-delivery, not per-messageId, so
+	// a redelivery of the same message gets a fresh value on purpose.
+	correlationID := uuid.NewString()
+	if err := c.handle(ctx, msg, correlationID); err != nil {
 		slog.ErrorContext(ctx, "sqs consumer: message processing failed, leaving for redelivery",
-			"consumer", c.consumerName, "messageId", messageID, "error", err)
+			"consumer", c.consumerName, "messageId", messageID, "correlationId", correlationID, "error", err)
+		if c.metrics != nil {
+			c.metrics.ObserveSQSMessage(c.consumerName, "error")
+		}
 		return
+	}
+	if c.metrics != nil {
+		c.metrics.ObserveSQSMessage(c.consumerName, "success")
 	}
 	if _, err := c.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(c.queueURL),
@@ -129,11 +164,11 @@ func (c *Consumer) processMessage(ctx context.Context, msg types.Message) {
 		// only risks a harmless redelivery (caught by the Inbox check below
 		// on the next attempt), not reprocessing.
 		slog.ErrorContext(ctx, "sqs consumer: failed to delete processed message",
-			"consumer", c.consumerName, "messageId", messageID, "error", err)
+			"consumer", c.consumerName, "messageId", messageID, "correlationId", correlationID, "error", err)
 	}
 }
 
-func (c *Consumer) handle(ctx context.Context, msg types.Message) error {
+func (c *Consumer) handle(ctx context.Context, msg types.Message, correlationID string) error {
 	messageID := aws.ToString(msg.MessageId)
 	body := aws.ToString(msg.Body)
 	hash := sha256.Sum256([]byte(body))
@@ -170,7 +205,7 @@ func (c *Consumer) handle(ctx context.Context, msg types.Message) error {
 		return fmt.Errorf("sqs consumer: malformed message body: %w", err)
 	}
 
-	if _, err := c.submitter.Submit(ctx, app.SubmitWagerTransactionInput{
+	result, err := c.submitter.Submit(ctx, app.SubmitWagerTransactionInput{
 		ProviderID:                     req.ProviderID,
 		ExternalTransactionID:          req.ExternalTransactionID,
 		PlayerID:                       req.PlayerID,
@@ -180,12 +215,38 @@ func (c *Consumer) handle(ctx context.Context, msg types.Message) error {
 		Kind:                           req.Kind,
 		Amount:                         req.Amount,
 		ReferenceExternalTransactionID: req.ReferenceExternalTransactionID,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
+	outcome := wagerOutcome(result)
+	if c.metrics != nil {
+		c.metrics.ObserveWagerSubmission(string(req.Kind), outcome)
+	}
+	// No amount/currency here, per Fase 11's "sem payloads financeiros
+	// completos" — just enough to trace one submission across HTTP/SQS/logs.
+	slog.InfoContext(ctx, "sqs consumer: wager transaction submitted",
+		"consumer", c.consumerName, "messageId", messageID, "correlationId", correlationID,
+		"providerId", req.ProviderID, "externalTransactionId", req.ExternalTransactionID,
+		"walletId", req.WalletID, "outcome", outcome)
 
 	if err := entry.MarkCompleted(); err != nil {
 		return err
 	}
 	return c.inbox.Save(ctx, entry)
+}
+
+// wagerOutcome classifies a submission result for logs/metrics — mirrors
+// internal/httpapi's identical helper (kept separate rather than shared,
+// same reasoning as this package's own copy of the request/response DTOs:
+// internal/sqs has no reason to depend on internal/httpapi's unexported
+// types for three lines of logic).
+func wagerOutcome(result *app.SubmitWagerTransactionResult) string {
+	if result.IdempotentReplay {
+		return "replay"
+	}
+	if result.Transaction == nil {
+		return "unknown"
+	}
+	return strings.ToLower(string(result.Transaction.Status()))
 }

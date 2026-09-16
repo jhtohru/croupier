@@ -129,7 +129,9 @@ Ou direto no host, com a infra (`postgres`, `localstack`, `keycloak`) já no ar 
 go run ./cmd/croupier
 ```
 
-Em ambos os casos a aplicação: aplica as migrations pendentes, sobe o servidor HTTP (`APP_PORT`, padrão `8081`), e inicia os workers de fundo (consumer SQS de `wager-transactions.fifo`, resolvedor de `PENDING_REFERENCE`, publicador de outbox) — tudo isso é o `fx.App` em `cmd/croupier/main.go`, ver ARCHITECTURE.md → "Composição (Uber Fx) e ciclo de vida". `Ctrl+C` (ou `docker compose stop app`) dispara shutdown gracioso: para de aceitar conexão nova, dá um tempo (`SHUTDOWN_TIMEOUT`, padrão 15s) pro que já estava em andamento terminar, então encerra.
+Em ambos os casos a aplicação: aplica as migrations pendentes, sobe o servidor HTTP (`APP_PORT`, padrão `8081`), e inicia os workers de fundo (consumer SQS de `wager-transactions.fifo`, resolvedor de `PENDING_REFERENCE`, publicador de outbox, poller de profundidade da DLQ) — tudo isso é o `fx.App` em `cmd/croupier/main.go`, ver ARCHITECTURE.md → "Composição (Uber Fx) e ciclo de vida". `Ctrl+C` (ou `docker compose stop app`) dispara shutdown gracioso: para de aceitar conexão nova, dá um tempo (`SHUTDOWN_TIMEOUT`, padrão 15s) pro que já estava em andamento terminar, então encerra.
+
+Logs saem em JSON no stdout (`docker compose logs app`), com `correlationId` em toda linha de requisição HTTP/mensagem SQS. Métricas Prometheus ficam em `GET /metrics` (sem autenticação, como `/health/*`) — ver ARCHITECTURE.md → "Observabilidade" para a lista completa e o porquê de cada uma.
 
 ## Exemplos de chamadas
 

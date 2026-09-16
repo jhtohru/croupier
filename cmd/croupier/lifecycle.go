@@ -105,6 +105,26 @@ func registerPendingReferenceResolver(lc fx.Lifecycle, cfg *Config, resolver *ap
 	})
 }
 
+// registerDLQDepthPoller reports the dead-letter queue's depth on a timer
+// (Fase 11) — same shape as the other two pollers above, just simpler: one
+// GetQueueAttributes call per tick, no batching/draining needed.
+func registerDLQDepthPoller(lc fx.Lifecycle, cfg *Config, poller *dlqDepthPoller) {
+	registerBackgroundLoop(lc, cfg, "dlq-depth-poller", func(ctx context.Context) error {
+		ticker := time.NewTicker(cfg.DLQDepthPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+				if err := poller.poll(ctx); err != nil {
+					slog.Error("dlq depth poll failed", "error", err)
+				}
+			}
+		}
+	})
+}
+
 func registerOutboxWorker(lc fx.Lifecycle, cfg *Config, worker *app.OutboxWorker) {
 	registerBackgroundLoop(lc, cfg, "outbox-worker", func(ctx context.Context) error {
 		ticker := time.NewTicker(cfg.OutboxPollInterval)

@@ -52,7 +52,7 @@ func (h *handler) createWallet(w http.ResponseWriter, r *http.Request) {
 		InitialBalance: req.InitialBalance,
 	})
 	if err != nil {
-		writeError(r.Context(), w, err)
+		writeError(r.Context(), w, err, "playerId", req.PlayerID)
 		return
 	}
 	writeJSON(w, http.StatusCreated, newWalletResponse(created))
@@ -67,7 +67,7 @@ func (h *handler) getWallet(w http.ResponseWriter, r *http.Request) {
 
 	got, err := h.deps.WalletGetter.Get(r.Context(), walletID)
 	if err != nil {
-		writeError(r.Context(), w, err)
+		writeError(r.Context(), w, err, "walletId", walletID)
 		return
 	}
 	writeJSON(w, http.StatusOK, newWalletResponse(got))
@@ -91,8 +91,11 @@ func (h *handler) reconcileWallet(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.deps.WalletReconciler.Reconcile(r.Context(), walletID)
 	if err != nil {
-		writeError(r.Context(), w, err)
+		writeError(r.Context(), w, err, "walletId", walletID)
 		return
+	}
+	if h.deps.Metrics != nil {
+		h.deps.Metrics.ObserveReconciliation(result.Consistent, result.Difference.Amount())
 	}
 	writeJSON(w, http.StatusOK, reconciliationResponse{
 		WalletID:          result.WalletID,
@@ -165,7 +168,7 @@ func (h *handler) listWalletLedger(w http.ResponseWriter, r *http.Request) {
 		Limit:    limit,
 	})
 	if err != nil {
-		writeError(r.Context(), w, err)
+		writeError(r.Context(), w, err, "walletId", walletID)
 		return
 	}
 	resp := listLedgerResponse{Entries: make([]ledgerEntryResponse, len(entries))}

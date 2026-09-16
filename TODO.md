@@ -126,11 +126,11 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[doc]` README.md → "Pré-requisitos", "Variáveis de ambiente", "Subindo o ambiente local (Docker Compose)", "Rodando a aplicação"; ARCHITECTURE.md → "Composição (Uber Fx) e ciclo de vida", "Graceful shutdown"
 
 ## Fase 11 — Observabilidade
-- [ ] `[~]` Logs JSON com correlationId, messageId, transactionId, walletId, providerId (sem credenciais/payloads financeiros completos)
-- [ ] `[~]` Métricas: status outcomes, duplicatas, retries, DLQ, conflitos de concorrência, latência de outbox/processamento, divergência de reconciliação
-- [ ] `[o]` Tracing OpenTelemetry (diferencial opcional)
-- [ ] `[o]` Dashboards (diferencial opcional)
-- [ ] `[doc]` ARCHITECTURE.md → "Observabilidade"
+- [x] `[~]` Logs JSON com correlationId, messageId, transactionId, walletId, providerId (sem credenciais/payloads financeiros completos) — `slog` com handler JSON (`configureLogging`, `cmd/croupier/main.go`); `correlationId` gerado/propagado por requisição HTTP (`internal/httpapi/server.go`) e por entrega SQS (`internal/sqs/consumer.go`); `writeError` anexa `correlationId`/`providerId` sempre, `walletId`/`transactionId`/`externalTransactionId` quando o handler tem o valor disponível. Verificado de verdade contra o app containerizado — ver ARCHITECTURE.md → "Observabilidade"
+- [x] `[~]` Métricas: status outcomes, duplicatas, retries, DLQ, conflitos de concorrência, latência de outbox/processamento, divergência de reconciliação — Prometheus (`internal/metrics`), exposto em `GET /metrics`; cada pacote que reporta uma métrica o faz via interface própria (mesmo padrão de repositório/publisher já usado em todo o projeto), nunca importando Prometheus diretamente. DLQ coberta por um gauge de profundidade (`croupier_sqs_dlq_depth`, polling periódico), não por um teste de ponta a ponta — ver limitação registrada em ARCHITECTURE.md. Verificado de verdade: fluxo HTTP completo + submissão via SQS real + `GET /metrics` conferido, todas as métricas esperadas presentes e corretas
+- [ ] `[o]` Tracing OpenTelemetry (diferencial opcional) — cortado por prazo, não necessário pra nenhum requisito obrigatório
+- [ ] `[o]` Dashboards (diferencial opcional) — idem
+- [x] `[doc]` ARCHITECTURE.md → "Observabilidade"
 
 ## Fase 12 — Cenários obrigatórios de concorrência e recuperação
 
