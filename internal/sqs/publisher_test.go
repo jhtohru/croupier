@@ -18,7 +18,8 @@ import (
 func TestPublisherPublish(t *testing.T) {
 	entry, err := outbox.NewEntry(outbox.NewEntryInput{
 		AggregateType: "Wallet", AggregateID: uuid.New(),
-		EventType: "WalletBalanceChanged", Payload: []byte(`{"walletId":"x"}`), OccurredAt: time.Now(),
+		EventType: "WalletBalanceChanged", Version: 1, Payload: []byte(`{"walletId":"x"}`), OccurredAt: time.Now(),
+		CorrelationID: "corr-1",
 	})
 	require.NoError(t, err)
 
@@ -40,6 +41,9 @@ func TestPublisherPublish(t *testing.T) {
 		assert.Equal(t, entry.ID(), envelope.EventID)
 		assert.Equal(t, entry.AggregateType(), envelope.AggregateType)
 		assert.Equal(t, entry.EventType(), envelope.EventType)
+		assert.Equal(t, entry.Version(), envelope.Version)
+		assert.Equal(t, entry.CorrelationID(), envelope.CorrelationID)
+		assert.Nil(t, envelope.CausationID)
 		assert.JSONEq(t, `{"walletId":"x"}`, string(envelope.Data))
 	})
 

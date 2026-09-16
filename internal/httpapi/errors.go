@@ -62,6 +62,16 @@ func writeError(ctx context.Context, w http.ResponseWriter, err error, extra ...
 		writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
 	case isValidationError(err):
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+	case errors.Is(err, app.ErrUnavailable):
+		// A dependency (Postgres) couldn't even be reached — transient
+		// infrastructure unavailability, not a bug or bad input. Challenge
+		// spec §9 requires this be distinguishable by contract from a
+		// generic 500, so it gets its own status instead of falling into
+		// default below. Still logged: an operator watching 503 rates cares
+		// just as much as they would about a 500.
+		slog.WarnContext(ctx, "httpapi: dependency unavailable",
+			"error", err, "correlationId", correlationIDFromContext(ctx))
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "service temporarily unavailable"})
 	default:
 		args := []any{
 			"error", err,

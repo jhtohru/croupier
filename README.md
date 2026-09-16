@@ -84,7 +84,7 @@ docker compose up -d localstack
 ```
 
 `deploy/localstack/init-queues.sh` roda sozinho dentro do container (hook `ready.d` do LocalStack) assim que o serviço SQS sobe, e cria:
-- `wager-transactions.fifo` — fila de entrada (submissões de wager transaction via SQS, mesmo formato do corpo de `POST /wagering/transactions`), com `RedrivePolicy` (`maxReceiveCount=5`) apontando pra...
+- `wager-transactions.fifo` — fila de entrada (submissões de wager transaction via SQS, envelope `{messageId, type, occurredAt, data}` — `data` carrega os mesmos campos do corpo de `POST /wagering/transactions` mais `idempotencyKey`; ver ARCHITECTURE.md → "Mensageria (SQS)"), com `RedrivePolicy` (`maxReceiveCount=5`) apontando pra...
 - `wager-transactions-dlq.fifo` — dead-letter queue
 - `wallet-events.fifo` — fila de saída (eventos de domínio publicados pelo outbox worker)
 
@@ -148,45 +148,45 @@ PROVIDER_TOKEN=$(curl -s -X POST http://localhost:8080/realms/croupier/protocol/
 
 Criar uma wallet com saldo inicial (rota de wallet — exige `$INTERNAL_TOKEN`):
 ```sh
-curl -s -X POST localhost:8080/wallets \
+curl -s -X POST localhost:8081/wallets \
   -H "Authorization: Bearer $INTERNAL_TOKEN" -H 'Content-Type: application/json' \
   -d '{"playerId":"11111111-1111-1111-1111-111111111111","initialBalance":{"amount":"100.00","currency":"BRL"}}'
 ```
 
 Consultar uma wallet:
 ```sh
-curl -s localhost:8080/wallets/<walletId> -H "Authorization: Bearer $INTERNAL_TOKEN"
+curl -s localhost:8081/wallets/<walletId> -H "Authorization: Bearer $INTERNAL_TOKEN"
 ```
 
-Submeter uma aposta (rota de wagering — exige `$PROVIDER_TOKEN`; `providerId` vem do token, não vai no corpo. O header `Idempotency-Key`, quando enviado, precisa bater com `providerId:externalTransactionId` — ver TODO.md, Fase 5):
+Submeter uma aposta (rota de wagering — exige `$PROVIDER_TOKEN`; `providerId` vem do token, não vai no corpo). O header `Idempotency-Key` é **obrigatório** (`400` se ausente) e precisa bater com `providerId:externalTransactionId` — ver ARCHITECTURE.md → "API HTTP (internal/httpapi)". Resposta: `{transactionId, status, balance, idempotentReplay}`:
 ```sh
-curl -s -X POST localhost:8080/wagering/transactions \
+curl -s -X POST localhost:8081/wagering/transactions \
   -H "Authorization: Bearer $PROVIDER_TOKEN" -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: provider-a:ext-1' \
   -d '{
     "externalTransactionId": "ext-1",
     "playerId": "11111111-1111-1111-1111-111111111111", "walletId": "<walletId>",
     "roundId": "round-1", "gameId": "game-1",
-    "kind": "BET", "amount": {"amount":"30.00","currency":"BRL"}
+    "kind": "BET", "money": {"amount":"30.00","currency":"BRL"}
   }'
 ```
 
 Consultar uma transação por id interno (só `$INTERNAL_TOKEN`) ou por `(providerId, externalTransactionId)` (o provider só acessa as próprias — path `providerId` precisa bater com o do token, exceto pra `$INTERNAL_TOKEN`, que acessa qualquer uma):
 ```sh
-curl -s localhost:8080/wagering/transactions/<transactionId> -H "Authorization: Bearer $INTERNAL_TOKEN"
-curl -s localhost:8080/providers/provider-a/wagering/transactions/ext-1 -H "Authorization: Bearer $PROVIDER_TOKEN"
+curl -s localhost:8081/wagering/transactions/<transactionId> -H "Authorization: Bearer $INTERNAL_TOKEN"
+curl -s localhost:8081/providers/provider-a/wagering/transactions/ext-1 -H "Authorization: Bearer $PROVIDER_TOKEN"
 ```
 
 Ledger paginado por cursor e reconciliação (rotas de wallet — `$INTERNAL_TOKEN`):
 ```sh
-curl -s "localhost:8080/wallets/<walletId>/ledger?limit=20" -H "Authorization: Bearer $INTERNAL_TOKEN"
-curl -s -X POST localhost:8080/wallets/<walletId>/reconciliation -H "Authorization: Bearer $INTERNAL_TOKEN"
+curl -s "localhost:8081/wallets/<walletId>/ledger?limit=20" -H "Authorization: Bearer $INTERNAL_TOKEN"
+curl -s -X POST localhost:8081/wallets/<walletId>/reconciliation -H "Authorization: Bearer $INTERNAL_TOKEN"
 ```
 
 Healthchecks:
 ```sh
-curl -s localhost:8080/health/live
-curl -s localhost:8080/health/ready   # 503 se Postgres estiver inacessível
+curl -s localhost:8081/health/live
+curl -s localhost:8081/health/ready   # 503 se Postgres estiver inacessível
 ```
 
 ## Rodando os testes

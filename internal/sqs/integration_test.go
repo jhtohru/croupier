@@ -106,10 +106,17 @@ func TestConsumerConsumesRealSQSMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, walletRepo.Save(context.Background(), w))
 
-	body, err := json.Marshal(wagerTransactionMessage{
-		ProviderID: "provider-" + uuid.New().String(), ExternalTransactionID: "ext-" + uuid.New().String(),
-		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
-		Kind: wager.KindBet, Amount: mustMoney(t, "30.00"),
+	providerID, externalTransactionID := "provider-"+uuid.New().String(), "ext-"+uuid.New().String()
+	body, err := json.Marshal(wagerTransactionEnvelope{
+		MessageID:  uuid.NewString(),
+		Type:       wagerTransactionRequestedType,
+		OccurredAt: time.Now().UTC(),
+		Data: wagerTransactionMessage{
+			ProviderID: providerID, ExternalTransactionID: externalTransactionID,
+			IdempotencyKey: providerID + ":" + externalTransactionID,
+			PlayerID:       w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+			Kind: wager.KindBet, Money: mustMoney(t, "30.00"),
+		},
 	})
 	require.NoError(t, err)
 
@@ -168,10 +175,17 @@ func TestConsumerRedeliveryAfterCommitBeforeDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, walletRepo.Save(context.Background(), w))
 
-	body, err := json.Marshal(wagerTransactionMessage{
-		ProviderID: "provider-" + uuid.New().String(), ExternalTransactionID: "ext-" + uuid.New().String(),
-		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
-		Kind: wager.KindBet, Amount: mustMoney(t, "30.00"),
+	providerID, externalTransactionID := "provider-"+uuid.New().String(), "ext-"+uuid.New().String()
+	body, err := json.Marshal(wagerTransactionEnvelope{
+		MessageID:  uuid.NewString(),
+		Type:       wagerTransactionRequestedType,
+		OccurredAt: time.Now().UTC(),
+		Data: wagerTransactionMessage{
+			ProviderID: providerID, ExternalTransactionID: externalTransactionID,
+			IdempotencyKey: providerID + ":" + externalTransactionID,
+			PlayerID:       w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+			Kind: wager.KindBet, Money: mustMoney(t, "30.00"),
+		},
 	})
 	require.NoError(t, err)
 	_, err = client.SendMessage(context.Background(), &awssqs.SendMessageInput{
@@ -245,7 +259,7 @@ func TestPublisherAndOutboxWorkerOverRealSQS(t *testing.T) {
 	creator := app.NewWalletCreator(walletRepo, wagerRepo, outboxRepo, txManager)
 	balance, err := money.FromMinorUnits("BRL", 5000)
 	require.NoError(t, err)
-	w, err := creator.Create(context.Background(), app.CreateWalletInput{PlayerID: uuid.New(), InitialBalance: balance})
+	w, err := creator.Create(context.Background(), app.CreateWalletInput{PlayerID: uuid.New(), InitialBalance: balance, CorrelationID: "test-correlation-id"})
 	require.NoError(t, err)
 
 	// Create's WagerTransactionProcessed event is keyed by the OPENING
@@ -336,7 +350,8 @@ func TestOutboxRecoveryAfterAbandonedPublish(t *testing.T) {
 
 	entry, err := outbox.NewEntry(outbox.NewEntryInput{
 		AggregateType: "Wallet", AggregateID: uuid.New(),
-		EventType: "WalletBalanceChanged", Payload: []byte(`{"test":true}`), OccurredAt: time.Now(),
+		EventType: "WalletBalanceChanged", Version: 1, Payload: []byte(`{"test":true}`), OccurredAt: time.Now(),
+		CorrelationID: "test-correlation-id",
 	})
 	require.NoError(t, err)
 	require.NoError(t, outboxRepo.SaveAll(context.Background(), entry))

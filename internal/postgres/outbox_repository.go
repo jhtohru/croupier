@@ -30,8 +30,8 @@ func NewOutboxRepository(pool *pgxpool.Pool) *OutboxRepository {
 // WagerRepository.Save.
 func (r *OutboxRepository) SaveAll(ctx context.Context, entries ...*outbox.Entry) error {
 	const q = `
-		INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload, occurred_at, status, retry_count, next_send_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, version, payload, occurred_at, correlation_id, causation_id, status, retry_count, next_send_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT (id) DO UPDATE SET
 			status = EXCLUDED.status,
 			retry_count = EXCLUDED.retry_count,
@@ -40,8 +40,8 @@ func (r *OutboxRepository) SaveAll(ctx context.Context, entries ...*outbox.Entry
 	db := dbFor(ctx, r.pool)
 	for _, e := range entries {
 		_, err := db.Exec(ctx, q,
-			e.ID(), e.AggregateType(), e.AggregateID(), e.EventType(), e.Payload(),
-			e.OccurredAt(), string(e.Status()), e.RetryCount(), e.NextSendAt(), e.CreatedAt(),
+			e.ID(), e.AggregateType(), e.AggregateID(), e.EventType(), e.Version(), e.Payload(),
+			e.OccurredAt(), e.CorrelationID(), e.CausationID(), string(e.Status()), e.RetryCount(), e.NextSendAt(), e.CreatedAt(),
 		)
 		if err != nil {
 			return err
@@ -57,7 +57,7 @@ func (r *OutboxRepository) SaveAll(ctx context.Context, entries ...*outbox.Entry
 // alone is enough to recover abandoned work with no separate lease column.
 func (r *OutboxRepository) FindDueForUpdate(ctx context.Context) (*outbox.Entry, error) {
 	const q = `
-		SELECT id, aggregate_type, aggregate_id, event_type, payload, occurred_at, status, retry_count, next_send_at, created_at
+		SELECT id, aggregate_type, aggregate_id, event_type, version, payload, occurred_at, correlation_id, causation_id, status, retry_count, next_send_at, created_at
 		FROM outbox
 		WHERE status = 'PENDING' AND next_send_at <= now()
 		ORDER BY created_at
@@ -75,12 +75,15 @@ func scanOutboxEntry(row scanner) (*outbox.Entry, error) {
 	var (
 		id, aggregateID                   uuid.UUID
 		aggregateType, eventType, status  string
+		version                           int
 		payload                           []byte
 		occurredAt, nextSendAt, createdAt time.Time
+		correlationID                     string
+		causationID                       *string
 		retryCount                        int
 	)
-	if err := row.Scan(&id, &aggregateType, &aggregateID, &eventType, &payload, &occurredAt, &status, &retryCount, &nextSendAt, &createdAt); err != nil {
+	if err := row.Scan(&id, &aggregateType, &aggregateID, &eventType, &version, &payload, &occurredAt, &correlationID, &causationID, &status, &retryCount, &nextSendAt, &createdAt); err != nil {
 		return nil, err
 	}
-	return outbox.EntryFromPersistence(id, aggregateType, aggregateID, eventType, payload, occurredAt, outbox.Status(status), retryCount, nextSendAt, createdAt), nil
+	return outbox.EntryFromPersistence(id, aggregateType, aggregateID, eventType, version, payload, occurredAt, correlationID, causationID, outbox.Status(status), retryCount, nextSendAt, createdAt), nil
 }

@@ -72,6 +72,9 @@ func main() {
 			provideHTTPServer,
 		),
 		fx.Invoke(
+			// Registered first so its OnStop (reverse registration order)
+			// runs last — see registerPostgresPool's own doc comment.
+			registerPostgresPool,
 			registerHTTPServer,
 			registerConsumer,
 			registerPendingReferenceResolver,

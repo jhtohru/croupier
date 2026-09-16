@@ -31,6 +31,14 @@ var (
 	ErrIdempotencyConflict           = errors.New("idempotency conflict")
 	ErrInboxEntryNotFound            = errors.New("inbox entry not found")
 	ErrOutboxEntryNotFound           = errors.New("outbox entry not found")
+	// ErrUnavailable means a repository call failed because it couldn't even
+	// reach its backing store (connection refused, dial timeout, ...), not
+	// because of anything about the request itself — internal/postgres wraps
+	// exactly this class of error (via pgconn.SafeToRetry) before returning
+	// it, so callers (internal/httpapi's writeError in particular) can map it
+	// to 503 instead of a generic 500, satisfying the challenge spec §9's
+	// "indisponibilidade transitória" being distinguishable by contract.
+	ErrUnavailable = errors.New("service temporarily unavailable")
 )
 
 // TxManager coordinates atomicity across repositories: repository calls made

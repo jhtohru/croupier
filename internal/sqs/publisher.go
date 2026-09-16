@@ -19,12 +19,23 @@ import (
 // from the message body (not just from SQS's own MessageDeduplicationId,
 // which isn't visible in the body) can recognize a republish after a crash
 // as the same logical event, satisfying "republicação preservando eventId."
+//
+// CorrelationID/CausationID/Version match the challenge spec §11 literally
+// ("O envelope deve conter eventId, eventType, aggregateId, correlationId,
+// causationId opcional, occurredAt, version e data tipado") — all three are
+// decided once, at event-construction time (internal/app/events.go, via
+// outbox.Entry), not by Publisher; this envelope just carries them onto the
+// wire unchanged. CausationID is omitted from the JSON entirely when nil,
+// matching "causationId opcional."
 type eventEnvelope struct {
 	EventID       uuid.UUID       `json:"eventId"`
 	AggregateType string          `json:"aggregateType"`
 	AggregateID   uuid.UUID       `json:"aggregateId"`
 	EventType     string          `json:"eventType"`
+	Version       int             `json:"version"`
 	OccurredAt    time.Time       `json:"occurredAt"`
+	CorrelationID string          `json:"correlationId"`
+	CausationID   *string         `json:"causationId,omitempty"`
 	Data          json.RawMessage `json:"data"`
 }
 
@@ -55,7 +66,10 @@ func (p *Publisher) Publish(ctx context.Context, entry *outbox.Entry) error {
 		AggregateType: entry.AggregateType(),
 		AggregateID:   entry.AggregateID(),
 		EventType:     entry.EventType(),
+		Version:       entry.Version(),
 		OccurredAt:    entry.OccurredAt(),
+		CorrelationID: entry.CorrelationID(),
+		CausationID:   entry.CausationID(),
 		Data:          entry.Payload(),
 	})
 	if err != nil {

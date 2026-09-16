@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jhtohru/croupier/internal/wager"
 )
 
@@ -89,16 +91,21 @@ func (r *PendingReferenceResolver) ResolveDue(ctx context.Context, now time.Time
 
 func (r *PendingReferenceResolver) resolveOne(ctx context.Context, now time.Time, item PendingReferenceRetry) error {
 	tx := item.Transaction
+	// Each resolution attempt is its own operation, not a live HTTP/SQS
+	// request — there's no caller-supplied correlationId to reuse here, so
+	// one is minted per attempt, same reasoning as internal/sqs.Consumer
+	// minting one per delivery.
+	correlationID := uuid.NewString()
 
 	if item.Attempts >= r.maxAttempts || now.Sub(tx.CreatedAt()) >= r.ttl {
-		_, err := r.submitter.reject(ctx, tx, FailureCodeReferenceNotFound)
+		_, err := r.submitter.reject(ctx, tx, FailureCodeReferenceNotFound, correlationID)
 		if err == nil && r.metrics != nil {
 			r.metrics.ObservePendingReferenceResolution("expired")
 		}
 		return err
 	}
 
-	if _, err := r.submitter.process(ctx, tx); err != nil {
+	if _, err := r.submitter.process(ctx, tx, correlationID); err != nil {
 		return err
 	}
 	if tx.Status() != wager.TxStatusPendingReference {

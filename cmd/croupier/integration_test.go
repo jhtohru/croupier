@@ -141,13 +141,14 @@ func TestSameOperationOverHTTPAndSQSIsNotDuplicated(t *testing.T) {
 		ExternalTransactionID: externalTransactionID,
 		PlayerID:              w.PlayerID(), WalletID: w.ID(),
 		RoundID: "round-1", GameID: "game-1",
-		Kind: wager.KindBet, Amount: amount,
+		Kind: wager.KindBet, Money: amount,
 	})
 	require.NoError(t, err)
 
 	httpReq := httptest.NewRequest(http.MethodPost, "/wagering/transactions", strings.NewReader(string(reqBody)))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Idempotency-Key", providerID+":"+externalTransactionID) // mandatory, spec §9
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, httpReq)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -156,11 +157,19 @@ func TestSameOperationOverHTTPAndSQSIsNotDuplicated(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, mustMoneyFromMinorUnits(t, 7000), afterHTTP.Balance())
 
-	// Second delivery: the exact same operation, over real SQS this time.
-	sqsBody, err := json.Marshal(sqsSubmitBody{
-		ProviderID: providerID, ExternalTransactionID: externalTransactionID,
-		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
-		Kind: wager.KindBet, Amount: amount,
+	// Second delivery: the exact same operation, over real SQS this time —
+	// wrapped in the challenge spec §10 envelope, same as a real provider
+	// would send.
+	sqsBody, err := json.Marshal(sqsSubmitEnvelope{
+		MessageID:  uuid.NewString(),
+		Type:       "WagerTransactionRequested",
+		OccurredAt: time.Now().UTC(),
+		Data: sqsSubmitBody{
+			ProviderID: providerID, ExternalTransactionID: externalTransactionID,
+			IdempotencyKey: providerID + ":" + externalTransactionID,
+			PlayerID:       w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+			Kind: wager.KindBet, Money: amount,
+		},
 	})
 	require.NoError(t, err)
 	_, err = sqsClient.SendMessage(ctx, &awssqs.SendMessageInput{
@@ -214,19 +223,29 @@ type httpSubmitBody struct {
 	RoundID               string      `json:"roundId"`
 	GameID                string      `json:"gameId"`
 	Kind                  wager.Kind  `json:"kind"`
-	Amount                money.Money `json:"amount"`
+	Money                 money.Money `json:"money"`
 }
 
-// sqsSubmitBody mirrors internal/sqs's (unexported) wagerTransactionMessage
-// — this one does carry providerId, since an inbound SQS message has no
-// bearer token to derive it from.
+// sqsSubmitEnvelope/sqsSubmitBody mirror internal/sqs's (unexported)
+// wagerTransactionEnvelope/wagerTransactionMessage — challenge spec §10's
+// {messageId, type, occurredAt, data} shape. sqsSubmitBody does carry
+// providerId and idempotencyKey, since an inbound SQS message has no bearer
+// token to derive providerId from and no header to carry idempotencyKey in.
+type sqsSubmitEnvelope struct {
+	MessageID  string        `json:"messageId"`
+	Type       string        `json:"type"`
+	OccurredAt time.Time     `json:"occurredAt"`
+	Data       sqsSubmitBody `json:"data"`
+}
+
 type sqsSubmitBody struct {
 	ProviderID            string      `json:"providerId"`
 	ExternalTransactionID string      `json:"externalTransactionId"`
+	IdempotencyKey        string      `json:"idempotencyKey"`
 	PlayerID              uuid.UUID   `json:"playerId"`
 	WalletID              uuid.UUID   `json:"walletId"`
 	RoundID               string      `json:"roundId"`
 	GameID                string      `json:"gameId"`
 	Kind                  wager.Kind  `json:"kind"`
-	Amount                money.Money `json:"amount"`
+	Money                 money.Money `json:"money"`
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -36,20 +37,41 @@ type receiveDeleter interface {
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 }
 
-// wagerTransactionMessage is the inbound message body shape — the same
-// fields httpapi's submitWagerTransactionRequest carries (both ingestion
-// paths feed the identical app.SubmitWagerTransactionInput), defined
-// separately here since internal/sqs has no reason to depend on
-// internal/httpapi's unexported types.
+// wagerTransactionRequestedType is the only inbound event type this queue
+// carries today (challenge spec §10's example envelope) — a message with
+// any other type is rejected as unsupported rather than silently guessed at.
+const wagerTransactionRequestedType = "WagerTransactionRequested"
+
+// wagerTransactionEnvelope is the inbound message's wire shape — challenge
+// spec §10: {messageId, type, occurredAt, data}. messageId here is the
+// envelope's own field, distinct from (and, per the spec, authoritative
+// over) *sqs.Client's transport-level msg.MessageId — see handle below for
+// why both exist and which one this consumer treats as the durable identity.
+type wagerTransactionEnvelope struct {
+	MessageID  string                  `json:"messageId"`
+	Type       string                  `json:"type"`
+	OccurredAt time.Time               `json:"occurredAt"`
+	Data       wagerTransactionMessage `json:"data"`
+}
+
+// wagerTransactionMessage is the envelope's "data" shape — the same fields
+// httpapi's submitWagerTransactionRequest carries (both ingestion paths feed
+// the identical app.SubmitWagerTransactionInput), plus idempotencyKey, which
+// plays here exactly the role the Idempotency-Key HTTP header plays for the
+// HTTP path: a client-supplied consistency check against
+// providerId:externalTransactionId (the actual identity), not a second
+// source of truth — see handle's validation below and the equivalent
+// reasoning in internal/httpapi/wagering.go.
 type wagerTransactionMessage struct {
 	ProviderID                     string      `json:"providerId"`
 	ExternalTransactionID          string      `json:"externalTransactionId"`
+	IdempotencyKey                 string      `json:"idempotencyKey"`
 	PlayerID                       uuid.UUID   `json:"playerId"`
 	WalletID                       uuid.UUID   `json:"walletId"`
 	RoundID                        string      `json:"roundId"`
 	GameID                         string      `json:"gameId"`
 	Kind                           wager.Kind  `json:"kind"`
-	Amount                         money.Money `json:"amount"`
+	Money                          money.Money `json:"money"`
 	ReferenceExternalTransactionID *string     `json:"referenceExternalTransactionId,omitempty"`
 }
 
@@ -108,8 +130,10 @@ func NewConsumer(client *sqs.Client, queueURL, consumerName string, submitter wa
 // first (see processMessage) rather than being abandoned mid-write.
 //
 // A ReceiveMessage/network error propagates up rather than being retried in
-// a loop here — Fase 10's supervisor decides whether and how to restart Run,
-// this package doesn't invent its own retry policy for that.
+// a loop here — cmd/croupier's registerBackgroundLoop is the supervisor that
+// restarts Run after a backoff when this happens (Fase 11: satisfies the
+// challenge spec's "indisponibilidade temporária do... SQS"), so this
+// package doesn't invent its own retry policy for that.
 func (c *Consumer) Run(ctx context.Context) error {
 	for {
 		if err := ctx.Err(); err != nil {
@@ -169,8 +193,36 @@ func (c *Consumer) processMessage(ctx context.Context, msg types.Message) {
 }
 
 func (c *Consumer) handle(ctx context.Context, msg types.Message, correlationID string) error {
-	messageID := aws.ToString(msg.MessageId)
+	sqsMessageID := aws.ToString(msg.MessageId)
 	body := aws.ToString(msg.Body)
+
+	var envelope wagerTransactionEnvelope
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		return fmt.Errorf("sqs consumer: malformed message envelope (sqs messageId %s): %w", sqsMessageID, err)
+	}
+	if envelope.Type != wagerTransactionRequestedType {
+		return fmt.Errorf("sqs consumer: unsupported message type %q (sqs messageId %s)", envelope.Type, sqsMessageID)
+	}
+	if envelope.MessageID == "" {
+		return fmt.Errorf("sqs consumer: message envelope missing messageId (sqs messageId %s)", sqsMessageID)
+	}
+	req := envelope.Data
+	if want := req.ProviderID + ":" + req.ExternalTransactionID; req.IdempotencyKey != want {
+		// Same reasoning as internal/httpapi's Idempotency-Key check: the
+		// real identity is (providerId, externalTransactionId), never
+		// overridden by a client-supplied key — a mismatch (including an
+		// altogether missing key, which never equals "provider:external")
+		// is malformed input, not a transient failure, so this is never
+		// worth redelivering as-is.
+		return fmt.Errorf("sqs consumer: idempotencyKey does not match providerId:externalTransactionId (messageId %s)", envelope.MessageID)
+	}
+
+	// messageId here is the envelope's own field, not sqsMessageID — per
+	// challenge spec §10 ("Use o messageId do envelope como identidade
+	// durável da mensagem"), that's the durable identity for inbox
+	// dedup/hash-on-redelivery, deliberately distinct from whatever SQS
+	// itself assigns at the transport level.
+	messageID := envelope.MessageID
 	hash := sha256.Sum256([]byte(body))
 
 	entry, err := c.inbox.FindByConsumerAndMessage(ctx, c.consumerName, messageID)
@@ -200,11 +252,6 @@ func (c *Consumer) handle(ctx context.Context, msg types.Message, correlationID 
 	// providerId:externalTransactionId (Fase 5), Inbox is a second,
 	// cheaper layer of dedup on top, not the correctness mechanism itself.
 
-	var req wagerTransactionMessage
-	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		return fmt.Errorf("sqs consumer: malformed message body: %w", err)
-	}
-
 	result, err := c.submitter.Submit(ctx, app.SubmitWagerTransactionInput{
 		ProviderID:                     req.ProviderID,
 		ExternalTransactionID:          req.ExternalTransactionID,
@@ -213,8 +260,9 @@ func (c *Consumer) handle(ctx context.Context, msg types.Message, correlationID 
 		RoundID:                        req.RoundID,
 		GameID:                         req.GameID,
 		Kind:                           req.Kind,
-		Amount:                         req.Amount,
+		Amount:                         req.Money,
 		ReferenceExternalTransactionID: req.ReferenceExternalTransactionID,
+		CorrelationID:                  correlationID,
 	})
 	if err != nil {
 		return err

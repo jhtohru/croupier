@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -34,12 +35,25 @@ func mustMoney(t *testing.T, amount string) money.Money {
 	return m
 }
 
-func testMessageBody(t *testing.T) string {
+// testMessageBody builds a message body in the challenge spec's §10 envelope
+// shape — envelopeMessageID is the envelope's own "messageId" field, the
+// durable identity handle keys inbox dedup on (see consumer.go), kept as an
+// explicit parameter here rather than reused from the surrounding
+// types.Message's transport-level MessageId, since the two are deliberately
+// different concepts (the tests below mostly just set them to the same
+// string for simplicity).
+func testMessageBody(t *testing.T, envelopeMessageID string) string {
 	t.Helper()
-	b, err := json.Marshal(wagerTransactionMessage{
-		ProviderID: "provider-a", ExternalTransactionID: "ext-1",
-		PlayerID: uuid.New(), WalletID: uuid.New(), RoundID: "round-1", GameID: "game-1",
-		Kind: wager.KindBet, Amount: mustMoney(t, "10.00"),
+	b, err := json.Marshal(wagerTransactionEnvelope{
+		MessageID:  envelopeMessageID,
+		Type:       wagerTransactionRequestedType,
+		OccurredAt: time.Now().UTC(),
+		Data: wagerTransactionMessage{
+			ProviderID: "provider-a", ExternalTransactionID: "ext-1",
+			IdempotencyKey: "provider-a:ext-1",
+			PlayerID:       uuid.New(), WalletID: uuid.New(), RoundID: "round-1", GameID: "game-1",
+			Kind: wager.KindBet, Money: mustMoney(t, "10.00"),
+		},
 	})
 	require.NoError(t, err)
 	return string(b)
@@ -53,7 +67,7 @@ func TestConsumerHandle(t *testing.T) {
 		inboxRepo := newFakeInboxRepository()
 		c := &Consumer{consumerName: consumerName, submitter: submitter, inbox: inboxRepo}
 
-		body := testMessageBody(t)
+		body := testMessageBody(t, "msg-1")
 		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(body), ReceiptHandle: aws.String("rh-1")}
 
 		err := c.handle(context.Background(), msg, "test-correlation-id")
@@ -71,7 +85,7 @@ func TestConsumerHandle(t *testing.T) {
 		inboxRepo := newFakeInboxRepository()
 		c := &Consumer{consumerName: consumerName, submitter: submitter, inbox: inboxRepo}
 
-		body := testMessageBody(t)
+		body := testMessageBody(t, "msg-1")
 		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(body), ReceiptHandle: aws.String("rh-1")}
 
 		require.NoError(t, c.handle(context.Background(), msg, "test-correlation-id"))
@@ -89,7 +103,7 @@ func TestConsumerHandle(t *testing.T) {
 		submitter := &fakeWagerSubmitter{}
 		inboxRepo := newFakeInboxRepository()
 		c := &Consumer{consumerName: consumerName, submitter: submitter, inbox: inboxRepo}
-		body := testMessageBody(t)
+		body := testMessageBody(t, "msg-1")
 		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(body), ReceiptHandle: aws.String("rh-1")}
 
 		// Pre-seed an inbox row that was created but never completed — as if
@@ -113,10 +127,10 @@ func TestConsumerHandle(t *testing.T) {
 		inboxRepo := newFakeInboxRepository()
 		c := &Consumer{consumerName: consumerName, submitter: submitter, inbox: inboxRepo}
 
-		first := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t)), ReceiptHandle: aws.String("rh-1")}
+		first := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t, "msg-1")), ReceiptHandle: aws.String("rh-1")}
 		require.NoError(t, c.handle(context.Background(), first, "test-correlation-id"))
 
-		different := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t) + " "), ReceiptHandle: aws.String("rh-2")}
+		different := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t, "msg-1") + " "), ReceiptHandle: aws.String("rh-2")}
 		err := c.handle(context.Background(), different, "test-correlation-id")
 
 		assert.Error(t, err)
@@ -140,7 +154,7 @@ func TestConsumerHandle(t *testing.T) {
 		inboxRepo := newFakeInboxRepository()
 		c := &Consumer{consumerName: consumerName, submitter: submitter, inbox: inboxRepo}
 
-		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t)), ReceiptHandle: aws.String("rh-1")}
+		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t, "msg-1")), ReceiptHandle: aws.String("rh-1")}
 		err := c.handle(context.Background(), msg, "test-correlation-id")
 
 		assert.Error(t, err)
@@ -157,7 +171,7 @@ func TestConsumerProcessMessageDeletesOnlyOnSuccess(t *testing.T) {
 		client := &fakeReceiveDeleter{}
 		c := &Consumer{consumerName: "c", submitter: submitter, inbox: inboxRepo, client: client}
 
-		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t)), ReceiptHandle: aws.String("rh-1")}
+		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t, "msg-1")), ReceiptHandle: aws.String("rh-1")}
 		c.processMessage(context.Background(), msg)
 
 		assert.Equal(t, []string{"rh-1"}, client.deletedHandle)
@@ -169,7 +183,7 @@ func TestConsumerProcessMessageDeletesOnlyOnSuccess(t *testing.T) {
 		client := &fakeReceiveDeleter{}
 		c := &Consumer{consumerName: "c", submitter: submitter, inbox: inboxRepo, client: client}
 
-		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t)), ReceiptHandle: aws.String("rh-1")}
+		msg := types.Message{MessageId: aws.String("msg-1"), Body: aws.String(testMessageBody(t, "msg-1")), ReceiptHandle: aws.String("rh-1")}
 		c.processMessage(context.Background(), msg)
 
 		assert.Empty(t, client.deletedHandle)

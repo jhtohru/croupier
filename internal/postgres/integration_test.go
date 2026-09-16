@@ -163,6 +163,7 @@ func TestWagerSubmitterConcurrentDuplicateSubmissions(t *testing.T) {
 				ProviderID: "provider-a", ExternalTransactionID: externalTransactionID,
 				PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
 				Kind: wager.KindBet, Amount: betAmount,
+				CorrelationID: "test-correlation-id",
 			})
 		}(i)
 	}
@@ -234,6 +235,7 @@ func TestWagerSubmitterConcurrentBets(t *testing.T) {
 				ProviderID: "provider-a", ExternalTransactionID: uuid.New().String(),
 				PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
 				Kind: wager.KindBet, Amount: betAmount,
+				CorrelationID: "test-correlation-id",
 			})
 		}(i)
 	}
@@ -374,6 +376,7 @@ func TestConcurrentBetsAcrossMultipleAppInstances(t *testing.T) {
 				ProviderID: "provider-a", ExternalTransactionID: uuid.New().String(),
 				PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
 				Kind: wager.KindBet, Amount: betAmount,
+				CorrelationID: "test-correlation-id",
 			})
 		}(i)
 	}
@@ -447,7 +450,8 @@ func TestOutboxRepositoryFindDueForUpdate(t *testing.T) {
 
 	entry, err := outbox.NewEntry(outbox.NewEntryInput{
 		AggregateType: "Wallet", AggregateID: uuid.New(),
-		EventType: "WalletBalanceChanged", Payload: []byte(`{}`), OccurredAt: time.Now(),
+		EventType: "WalletBalanceChanged", Version: 1, Payload: []byte(`{}`), OccurredAt: time.Now(),
+		CorrelationID: "test-correlation-id",
 	})
 	require.NoError(t, err)
 	require.NoError(t, outboxRepo.SaveAll(context.Background(), entry))
@@ -488,7 +492,8 @@ func TestOutboxRepositoryFindDueForUpdateSkipsLockedRows(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		e, err := outbox.NewEntry(outbox.NewEntryInput{
 			AggregateType: "Wallet", AggregateID: uuid.New(),
-			EventType: "WalletBalanceChanged", Payload: []byte(`{}`), OccurredAt: time.Now(),
+			EventType: "WalletBalanceChanged", Version: 1, Payload: []byte(`{}`), OccurredAt: time.Now(),
+			CorrelationID: "test-correlation-id",
 		})
 		require.NoError(t, err)
 		require.NoError(t, outboxRepo.SaveAll(context.Background(), e))
@@ -558,6 +563,7 @@ func TestPendingReferenceResolverRealPostgres(t *testing.T) {
 		ProviderID: providerID, ExternalTransactionID: "refund-" + uuid.New().String(),
 		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
 		Kind: wager.KindRefund, Amount: mustMoney(t, 3000), ReferenceExternalTransactionID: &missingRefID,
+		CorrelationID: "test-correlation-id",
 	})
 	require.NoError(t, err)
 	require.Equal(t, wager.TxStatusPendingReference, refundResult.Transaction.Status())
@@ -587,6 +593,7 @@ func TestPendingReferenceResolverRealPostgres(t *testing.T) {
 		ProviderID: providerID, ExternalTransactionID: missingRefID,
 		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
 		Kind: wager.KindBet, Amount: mustMoney(t, 3000),
+		CorrelationID: "test-correlation-id",
 	})
 	require.NoError(t, err)
 

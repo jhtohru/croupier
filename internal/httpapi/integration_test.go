@@ -111,6 +111,20 @@ func doRequestNoAuth(t *testing.T, srv *Server, method, target string, body any)
 	return rec
 }
 
+// doWagerSubmission is doAuthed specialized for POST /wagering/transactions,
+// which requires an Idempotency-Key header (challenge spec §9) — providerID
+// here is the identity behind token, needed to build the expected
+// "{providerId}:{externalTransactionId}" value.
+func doWagerSubmission(t *testing.T, srv *Server, token, providerID string, req submitWagerTransactionRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	r := newBareRequest(t, http.MethodPost, "/wagering/transactions", req)
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("Idempotency-Key", providerID+":"+req.ExternalTransactionID)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, r)
+	return rec
+}
+
 func newBareRequest(t *testing.T, method, target string, body any) *http.Request {
 	t.Helper()
 	if body == nil {
@@ -154,24 +168,32 @@ func TestWagerLifecycleOverHTTP(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
 	betExtID := "bet-" + uuid.New().String()
-	rec = doAuthed(t, srv, providerToken, http.MethodPost, "/wagering/transactions", submitWagerTransactionRequest{
+	rec = doWagerSubmission(t, srv, providerToken, providerID, submitWagerTransactionRequest{
 		ExternalTransactionID: betExtID,
 		PlayerID:              playerID, WalletID: created.ID, RoundID: "round-1", GameID: "game-1",
-		Kind: wager.KindBet, Amount: mustMoney(t, "30.00"),
+		Kind: wager.KindBet, Money: mustMoney(t, "30.00"),
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var betResp submitWagerTransactionResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &betResp))
-	assert.Equal(t, wager.TxStatusProcessed, betResp.Transaction.Status)
-	assert.Equal(t, providerID, betResp.Transaction.ProviderID) // came from the token, not a body field
+	assert.Equal(t, wager.TxStatusProcessed, betResp.Status)
 	assert.Equal(t, mustMoney(t, "70.00"), betResp.Balance)
+
+	// providerId isn't in the flat submission response (spec §9's example
+	// shape has no room for it) — confirmed via a lookup instead, which does
+	// carry it, straight from the token, never a body field.
+	rec = doAuthed(t, srv, internalToken, http.MethodGet, "/wagering/transactions/"+betResp.TransactionID.String(), nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var betTx wagerTransactionResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &betTx))
+	assert.Equal(t, providerID, betTx.ProviderID)
 
 	// Idempotent replay of the exact same submission must not move the
 	// balance again — same content, same key, same observed result.
-	rec = doAuthed(t, srv, providerToken, http.MethodPost, "/wagering/transactions", submitWagerTransactionRequest{
+	rec = doWagerSubmission(t, srv, providerToken, providerID, submitWagerTransactionRequest{
 		ExternalTransactionID: betExtID,
 		PlayerID:              playerID, WalletID: created.ID, RoundID: "round-1", GameID: "game-1",
-		Kind: wager.KindBet, Amount: mustMoney(t, "30.00"),
+		Kind: wager.KindBet, Money: mustMoney(t, "30.00"),
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var replayResp submitWagerTransactionResponse
@@ -180,10 +202,10 @@ func TestWagerLifecycleOverHTTP(t *testing.T) {
 	assert.Equal(t, mustMoney(t, "70.00"), replayResp.Balance)
 
 	winExtID := "win-" + uuid.New().String()
-	rec = doAuthed(t, srv, providerToken, http.MethodPost, "/wagering/transactions", submitWagerTransactionRequest{
+	rec = doWagerSubmission(t, srv, providerToken, providerID, submitWagerTransactionRequest{
 		ExternalTransactionID: winExtID,
 		PlayerID:              playerID, WalletID: created.ID, RoundID: "round-1", GameID: "game-1",
-		Kind: wager.KindWin, Amount: mustMoney(t, "50.00"),
+		Kind: wager.KindWin, Money: mustMoney(t, "50.00"),
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var winResp submitWagerTransactionResponse
@@ -191,9 +213,9 @@ func TestWagerLifecycleOverHTTP(t *testing.T) {
 	assert.Equal(t, mustMoney(t, "120.00"), winResp.Balance)
 
 	// Internal id lookup is internal-service-only.
-	rec = doAuthed(t, srv, internalToken, http.MethodGet, "/wagering/transactions/"+betResp.Transaction.ID.String(), nil)
+	rec = doAuthed(t, srv, internalToken, http.MethodGet, "/wagering/transactions/"+betResp.TransactionID.String(), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
-	rec = doAuthed(t, srv, providerToken, http.MethodGet, "/wagering/transactions/"+betResp.Transaction.ID.String(), nil)
+	rec = doAuthed(t, srv, providerToken, http.MethodGet, "/wagering/transactions/"+betResp.TransactionID.String(), nil)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
 	// Provider-facing lookup: provider-a may read its own transaction...
@@ -201,7 +223,7 @@ func TestWagerLifecycleOverHTTP(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var byProvider wagerTransactionResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &byProvider))
-	assert.Equal(t, winResp.Transaction.ID, byProvider.ID)
+	assert.Equal(t, winResp.TransactionID, byProvider.ID)
 
 	// ...but provider-b, a real, distinct authenticated identity, may not.
 	providerBToken := fetchRealToken(t, "provider-b", "provider-b-secret")

@@ -45,6 +45,9 @@ func newSubmitTestEnv(t *testing.T, initialBalance int64) (submitTestEnv, *walle
 
 func mustSubmit(t *testing.T, env submitTestEnv, input SubmitWagerTransactionInput) *SubmitWagerTransactionResult {
 	t.Helper()
+	if input.CorrelationID == "" {
+		input.CorrelationID = "test-correlation-id"
+	}
 	result, err := env.submitter.Submit(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
@@ -353,6 +356,7 @@ func TestWagerSubmitterSubmitRetriesAsReplayOnInsertRace(t *testing.T) {
 		ProviderID: "provider-a", ExternalTransactionID: "bet-1",
 		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
 		Kind: wager.KindBet, Amount: mustAmount(t, 3000),
+		CorrelationID: "test-correlation-id",
 	}
 	winner, err := wager.NewTransaction(wager.NewTransactionInput{
 		ProviderID: winnerInput.ProviderID, ExternalTransactionID: winnerInput.ExternalTransactionID,

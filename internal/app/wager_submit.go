@@ -44,6 +44,12 @@ type SubmitWagerTransactionInput struct {
 	Kind                           wager.Kind
 	Amount                         money.Money
 	ReferenceExternalTransactionID *string
+	// CorrelationID identifies the HTTP request or SQS delivery that caused
+	// this submission — required, propagated onto every outbox event this
+	// call emits (challenge spec §11's event envelope). Callers already have
+	// one: internal/httpapi generates/forwards one per request (Fase 11),
+	// internal/sqs.Consumer generates one per delivery.
+	CorrelationID string
 }
 
 type SubmitWagerTransactionResult struct {
@@ -79,7 +85,7 @@ func (ws *WagerSubmitter) Submit(ctx context.Context, input SubmitWagerTransacti
 		return ws.replay(ctx, existing, candidate)
 	}
 
-	result, err := ws.process(ctx, candidate)
+	result, err := ws.process(ctx, candidate, input.CorrelationID)
 	if errors.Is(err, ErrWagerTransactionAlreadyExists) {
 		// This check-then-insert is inherently racy under real concurrency
 		// (the check above and process's own insert aren't one atomic step)
@@ -140,7 +146,7 @@ func (ws *WagerSubmitter) balanceAtProcessing(ctx context.Context, tx *wager.Tra
 	return w.Balance(), nil
 }
 
-func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction) (*SubmitWagerTransactionResult, error) {
+func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction, correlationID string) (*SubmitWagerTransactionResult, error) {
 	var referenced *wager.Transaction
 	if tx.Kind() == wager.KindRefund || tx.Kind() == wager.KindRollback {
 		refExtID := *tx.ReferenceExternalTransactionID()
@@ -150,10 +156,10 @@ func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction) (*
 			return nil, err
 		}
 		if referenced == nil {
-			return ws.parkPendingReference(ctx, tx)
+			return ws.parkPendingReference(ctx, tx, correlationID)
 		}
 		if err := tx.ValidateReference(*referenced); err != nil {
-			return ws.reject(ctx, tx, FailureCodeInvalidReference)
+			return ws.reject(ctx, tx, FailureCodeInvalidReference, correlationID)
 		}
 		if err := tx.ResolveReference(referenced.ID()); err != nil {
 			return nil, err
@@ -163,12 +169,12 @@ func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction) (*
 			return nil, err
 		}
 		if duplicate != nil {
-			return ws.reject(ctx, tx, FailureCodeDuplicateReversal)
+			return ws.reject(ctx, tx, FailureCodeDuplicateReversal, correlationID)
 		}
 	}
 
 	if tx.Kind() == wager.KindLoss {
-		return ws.finishWithoutMovement(ctx, tx)
+		return ws.finishWithoutMovement(ctx, tx, correlationID)
 	}
 
 	direction, err := movementDirection(tx.Kind(), referenced)
@@ -207,7 +213,7 @@ func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction) (*
 			if err := tx.MarkRejected(code); err != nil {
 				return err
 			}
-			event, err := newWagerTransactionRejectedEvent(tx)
+			event, err := newWagerTransactionRejectedEvent(tx, correlationID)
 			if err != nil {
 				return err
 			}
@@ -235,11 +241,12 @@ func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction) (*
 		if err := tx.MarkProcessed(); err != nil {
 			return err
 		}
-		processedEvent, err := newWagerTransactionProcessedEvent(tx)
+		processedEvent, err := newWagerTransactionProcessedEvent(tx, correlationID)
 		if err != nil {
 			return err
 		}
-		balanceChangedEvent, err := newWalletBalanceChangedEvent(w, entry)
+		processedEventID := processedEvent.ID().String()
+		balanceChangedEvent, err := newWalletBalanceChangedEvent(w, entry, correlationID, &processedEventID)
 		if err != nil {
 			return err
 		}
@@ -294,7 +301,7 @@ func movementDirection(kind wager.Kind, referenced *wager.Transaction) (wallet.D
 // re-emitting the same event every retry cycle would spam the outbox without
 // telling any consumer anything it doesn't already know. Retry bookkeeping
 // (attempt count, next retry time) is the resolver's job, not this method's.
-func (ws *WagerSubmitter) parkPendingReference(ctx context.Context, tx *wager.Transaction) (*SubmitWagerTransactionResult, error) {
+func (ws *WagerSubmitter) parkPendingReference(ctx context.Context, tx *wager.Transaction, correlationID string) (*SubmitWagerTransactionResult, error) {
 	alreadyParked := tx.Status() == wager.TxStatusPendingReference
 	if err := tx.MarkPendingReference(); err != nil {
 		return nil, err
@@ -306,29 +313,29 @@ func (ws *WagerSubmitter) parkPendingReference(ctx context.Context, tx *wager.Tr
 		}
 		return &SubmitWagerTransactionResult{Transaction: tx, Balance: w.Balance()}, nil
 	}
-	event, err := newWagerTransactionPendingReferenceEvent(tx)
+	event, err := newWagerTransactionPendingReferenceEvent(tx, correlationID)
 	if err != nil {
 		return nil, err
 	}
 	return ws.saveWithEvent(ctx, tx, event)
 }
 
-func (ws *WagerSubmitter) reject(ctx context.Context, tx *wager.Transaction, code wager.FailureCode) (*SubmitWagerTransactionResult, error) {
+func (ws *WagerSubmitter) reject(ctx context.Context, tx *wager.Transaction, code wager.FailureCode, correlationID string) (*SubmitWagerTransactionResult, error) {
 	if err := tx.MarkRejected(code); err != nil {
 		return nil, err
 	}
-	event, err := newWagerTransactionRejectedEvent(tx)
+	event, err := newWagerTransactionRejectedEvent(tx, correlationID)
 	if err != nil {
 		return nil, err
 	}
 	return ws.saveWithEvent(ctx, tx, event)
 }
 
-func (ws *WagerSubmitter) finishWithoutMovement(ctx context.Context, tx *wager.Transaction) (*SubmitWagerTransactionResult, error) {
+func (ws *WagerSubmitter) finishWithoutMovement(ctx context.Context, tx *wager.Transaction, correlationID string) (*SubmitWagerTransactionResult, error) {
 	if err := tx.MarkProcessed(); err != nil {
 		return nil, err
 	}
-	event, err := newWagerTransactionProcessedEvent(tx)
+	event, err := newWagerTransactionProcessedEvent(tx, correlationID)
 	if err != nil {
 		return nil, err
 	}

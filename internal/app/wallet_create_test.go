@@ -73,7 +73,7 @@ func TestWalletCreatorCreate(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		w, err := wc.Create(context.Background(), CreateWalletInput{PlayerID: playerID, InitialBalance: balance})
+		w, err := wc.Create(context.Background(), CreateWalletInput{PlayerID: playerID, InitialBalance: balance, CorrelationID: "test-correlation-id"})
 		assert.NoError(t, err)
 		if assert.NotNil(t, w) {
 			assert.Equal(t, playerID, w.PlayerID())

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
@@ -40,8 +41,21 @@ func requestFromTx(tx *wager.Transaction) submitWagerTransactionRequest {
 		RoundID:               tx.RoundID(),
 		GameID:                tx.GameID(),
 		Kind:                  tx.Kind(),
-		Amount:                tx.Amount(),
+		Money:                 tx.Amount(),
 	}
+}
+
+// doWagerRequest builds a POST /wagering/transactions request with a valid
+// (matching) Idempotency-Key header set — that header is mandatory (spec
+// §9), so every test exercising a path past that check needs one; tests
+// about the header itself (below) build the request manually instead.
+func doWagerRequest(t *testing.T, srv *Server, req submitWagerTransactionRequest, providerID string) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	r := newJSONRequest(t, http.MethodPost, "/wagering/transactions", b)
+	r.Header.Set("Idempotency-Key", providerID+":"+req.ExternalTransactionID)
+	return recordRequest(srv, r)
 }
 
 func TestSubmitWagerTransaction(t *testing.T) {
@@ -52,15 +66,29 @@ func TestSubmitWagerTransaction(t *testing.T) {
 		}}
 		srv := NewServer(Deps{Auth: providerAuth(tx.ProviderID()), WagerSubmitter: submitter})
 
-		rec := doRequest(t, srv, http.MethodPost, "/wagering/transactions", requestFromTx(tx))
+		rec := doWagerRequest(t, srv, requestFromTx(tx), tx.ProviderID())
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		var got submitWagerTransactionResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-		assert.Equal(t, tx.ID(), got.Transaction.ID)
+		assert.Equal(t, tx.ID(), got.TransactionID)
+		assert.Equal(t, tx.Status(), got.Status)
 		// providerId came from the token, not the request body — there's no
 		// field for it in submitWagerTransactionRequest at all.
 		assert.Equal(t, tx.ProviderID(), submitter.gotInput.ProviderID)
+	})
+
+	t.Run("missing Idempotency-Key maps to 400", func(t *testing.T) {
+		submitter := &stubWagerSubmitter{}
+		srv := NewServer(Deps{Auth: providerAuth("provider-a"), WagerSubmitter: submitter})
+
+		rec := doRequest(t, srv, http.MethodPost, "/wagering/transactions", submitWagerTransactionRequest{
+			ExternalTransactionID: "ext-1",
+			PlayerID:              uuid.New(), WalletID: uuid.New(), RoundID: "round-1", GameID: "game-1",
+			Kind: wager.KindBet, Money: mustMoney(t, "80.00"),
+		})
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("Idempotency-Key mismatch maps to 400", func(t *testing.T) {
@@ -70,7 +98,7 @@ func TestSubmitWagerTransaction(t *testing.T) {
 		b, err := json.Marshal(submitWagerTransactionRequest{
 			ExternalTransactionID: "ext-1",
 			PlayerID:              uuid.New(), WalletID: uuid.New(), RoundID: "round-1", GameID: "game-1",
-			Kind: wager.KindBet, Amount: mustMoney(t, "80.00"),
+			Kind: wager.KindBet, Money: mustMoney(t, "80.00"),
 		})
 		require.NoError(t, err)
 		r := newJSONRequest(t, http.MethodPost, "/wagering/transactions", b)
@@ -85,11 +113,7 @@ func TestSubmitWagerTransaction(t *testing.T) {
 		submitter := &stubWagerSubmitter{result: &app.SubmitWagerTransactionResult{Transaction: tx, Balance: mustMoney(t, "20.00")}}
 		srv := NewServer(Deps{Auth: providerAuth(tx.ProviderID()), WagerSubmitter: submitter})
 
-		b, err := json.Marshal(requestFromTx(tx))
-		require.NoError(t, err)
-		r := newJSONRequest(t, http.MethodPost, "/wagering/transactions", b)
-		r.Header.Set("Idempotency-Key", tx.ProviderID()+":"+tx.ExternalTransactionID())
-		rec := recordRequest(srv, r)
+		rec := doWagerRequest(t, srv, requestFromTx(tx), tx.ProviderID())
 
 		assert.Equal(t, http.StatusOK, rec.Code)
 	})
@@ -97,22 +121,22 @@ func TestSubmitWagerTransaction(t *testing.T) {
 	t.Run("idempotency conflict maps to 409", func(t *testing.T) {
 		submitter := &stubWagerSubmitter{err: app.ErrIdempotencyConflict}
 		srv := NewServer(Deps{Auth: providerAuth("provider-a"), WagerSubmitter: submitter})
-		rec := doRequest(t, srv, http.MethodPost, "/wagering/transactions", submitWagerTransactionRequest{
+		rec := doWagerRequest(t, srv, submitWagerTransactionRequest{
 			ExternalTransactionID: "ext-1",
 			PlayerID:              uuid.New(), WalletID: uuid.New(), RoundID: "round-1", GameID: "game-1",
-			Kind: wager.KindBet, Amount: mustMoney(t, "80.00"),
-		})
+			Kind: wager.KindBet, Money: mustMoney(t, "80.00"),
+		}, "provider-a")
 		assert.Equal(t, http.StatusConflict, rec.Code)
 	})
 
 	t.Run("invalid kind maps to 400", func(t *testing.T) {
 		submitter := &stubWagerSubmitter{err: wager.ErrInvalidKind}
 		srv := NewServer(Deps{Auth: providerAuth("provider-a"), WagerSubmitter: submitter})
-		rec := doRequest(t, srv, http.MethodPost, "/wagering/transactions", submitWagerTransactionRequest{
+		rec := doWagerRequest(t, srv, submitWagerTransactionRequest{
 			ExternalTransactionID: "ext-1",
 			PlayerID:              uuid.New(), WalletID: uuid.New(), RoundID: "round-1", GameID: "game-1",
-			Kind: wager.KindOpening, Amount: mustMoney(t, "80.00"),
-		})
+			Kind: wager.KindOpening, Money: mustMoney(t, "80.00"),
+		}, "provider-a")
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 }

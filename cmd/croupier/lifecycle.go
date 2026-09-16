@@ -9,12 +9,29 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
 	"github.com/jhtohru/croupier/internal/app"
 	"github.com/jhtohru/croupier/internal/httpapi"
 	croupiersqs "github.com/jhtohru/croupier/internal/sqs"
 )
+
+// registerPostgresPool ties the pool's lifetime to fx's own, closing it only
+// after every other OnStop hook has run — registered first in main.go's
+// fx.Invoke list, so (OnStop runs in reverse registration order) its own
+// OnStop runs last, once HTTP handlers and background workers still using
+// the pool have all finished. Satisfies the challenge spec §4's "fechamento
+// das dependências após a finalização dos componentes que as utilizam" —
+// previously the pool was never explicitly closed at all.
+func registerPostgresPool(lc fx.Lifecycle, pool *pgxpool.Pool) {
+	lc.Append(fx.Hook{
+		OnStop: func(context.Context) error {
+			pool.Close()
+			return nil
+		},
+	})
+}
 
 // registerHTTPServer starts the HTTP server on OnStart and gives it up to
 // cfg.ShutdownTimeout to finish in-flight requests on OnStop
@@ -52,6 +69,17 @@ func registerHTTPServer(lc fx.Lifecycle, srv *httpapi.Server, cfg *Config) {
 // waits (bounded by cfg.ShutdownTimeout) for it to actually return, so a
 // worker mid-processing gets a real chance to finish instead of being
 // abandoned the instant the process starts exiting.
+//
+// If run returns an error other than context cancellation, it's restarted
+// after an exponential backoff instead of being left dead for the rest of
+// the process's life — this is what satisfies the challenge spec §3's
+// "indisponibilidade temporária do... SQS" for internal/sqs.Consumer.Run in
+// particular: a ReceiveMessage failure during a LocalStack/SQS blip used to
+// end Run permanently (its own doc comment even said a supervisor would
+// handle restarts, but until this, none did). The other three loops
+// registered through this function (outbox worker, pending-reference
+// resolver, DLQ poller) already swallow their own per-tick errors and never
+// hit this path in practice, but gain the same safety net for free.
 func registerBackgroundLoop(lc fx.Lifecycle, cfg *Config, name string, run func(ctx context.Context) error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -59,8 +87,22 @@ func registerBackgroundLoop(lc fx.Lifecycle, cfg *Config, name string, run func(
 		OnStart: func(context.Context) error {
 			go func() {
 				defer close(done)
-				if err := run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					slog.Error("background loop exited with error", "name", name, "error", err)
+				backoff := time.Second
+				const maxBackoff = 30 * time.Second
+				for {
+					err := run(ctx)
+					if err == nil || errors.Is(err, context.Canceled) {
+						return
+					}
+					slog.Error("background loop exited with error, restarting", "name", name, "error", err, "backoff", backoff)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(backoff):
+					}
+					if backoff *= 2; backoff > maxBackoff {
+						backoff = maxBackoff
+					}
 				}
 			}()
 			slog.Info("background loop started", "name", name)

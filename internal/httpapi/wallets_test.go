@@ -146,6 +146,16 @@ func TestGetWallet(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodGet, "/wallets/not-a-uuid", nil)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
+
+	// Challenge spec §9: "indisponibilidade transitória" must be
+	// distinguishable by contract from an opaque 500 — app.ErrUnavailable
+	// (internal/postgres wraps connectivity failures into this) gets its own
+	// status instead of falling into writeError's generic default branch.
+	t.Run("dependency unavailable maps to 503", func(t *testing.T) {
+		srv := NewServer(Deps{Auth: internalAuth(), WalletGetter: stubWalletGetter{err: app.ErrUnavailable}})
+		rec := doRequest(t, srv, http.MethodGet, "/wallets/"+uuid.New().String(), nil)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
 }
 
 func TestReconcileWallet(t *testing.T) {
@@ -166,7 +176,7 @@ func TestReconcileWallet(t *testing.T) {
 	var got reconciliationResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.True(t, got.Consistent)
-	assert.Equal(t, 2, got.EntriesChecked)
+	assert.Equal(t, 2, got.CheckedEntries)
 }
 
 func TestListWalletLedger(t *testing.T) {

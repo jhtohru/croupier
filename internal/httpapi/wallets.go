@@ -50,6 +50,7 @@ func (h *handler) createWallet(w http.ResponseWriter, r *http.Request) {
 	created, err := h.deps.WalletCreator.Create(r.Context(), app.CreateWalletInput{
 		PlayerID:       req.PlayerID,
 		InitialBalance: req.InitialBalance,
+		CorrelationID:  correlationIDFromContext(r.Context()),
 	})
 	if err != nil {
 		writeError(r.Context(), w, err, "playerId", req.PlayerID)
@@ -73,13 +74,15 @@ func (h *handler) getWallet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newWalletResponse(got))
 }
 
+// checkedEntries matches the challenge spec's §9 example response field name
+// literally (not "entriesChecked").
 type reconciliationResponse struct {
 	WalletID          uuid.UUID   `json:"walletId"`
 	StoredBalance     money.Money `json:"storedBalance"`
 	CalculatedBalance money.Money `json:"calculatedBalance"`
 	Difference        money.Money `json:"difference"`
 	Consistent        bool        `json:"consistent"`
-	EntriesChecked    int         `json:"entriesChecked"`
+	CheckedEntries    int         `json:"checkedEntries"`
 }
 
 func (h *handler) reconcileWallet(w http.ResponseWriter, r *http.Request) {
@@ -103,7 +106,7 @@ func (h *handler) reconcileWallet(w http.ResponseWriter, r *http.Request) {
 		CalculatedBalance: result.CalculatedBalance,
 		Difference:        result.Difference,
 		Consistent:        result.Consistent,
-		EntriesChecked:    result.EntriesChecked,
+		CheckedEntries:    result.EntriesChecked,
 	})
 }
 

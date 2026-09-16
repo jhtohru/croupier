@@ -13,8 +13,10 @@ func validNewEntryInput() NewEntryInput {
 		AggregateType: "WagerTransaction",
 		AggregateID:   uuid.New(),
 		EventType:     "WagerTransactionProcessed",
+		Version:       1,
 		Payload:       []byte(`{"foo":"bar"}`),
 		OccurredAt:    time.Now(),
+		CorrelationID: "corr-1",
 	}
 }
 
@@ -59,6 +61,22 @@ func TestNewEntry(t *testing.T) {
 		assert.Nil(t, e)
 	})
 
+	t.Run("zero version", func(t *testing.T) {
+		input := validNewEntryInput()
+		input.Version = 0
+		e, err := NewEntry(input)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+		assert.Nil(t, e)
+	})
+
+	t.Run("empty correlation id", func(t *testing.T) {
+		input := validNewEntryInput()
+		input.CorrelationID = ""
+		e, err := NewEntry(input)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+		assert.Nil(t, e)
+	})
+
 	t.Run("success", func(t *testing.T) {
 		input := validNewEntryInput()
 		e, err := NewEntry(input)
@@ -68,11 +86,25 @@ func TestNewEntry(t *testing.T) {
 			assert.Equal(t, input.AggregateType, e.AggregateType())
 			assert.Equal(t, input.AggregateID, e.AggregateID())
 			assert.Equal(t, input.EventType, e.EventType())
+			assert.Equal(t, input.Version, e.Version())
 			assert.Equal(t, input.Payload, e.Payload())
 			assert.Equal(t, input.OccurredAt, e.OccurredAt())
+			assert.Equal(t, input.CorrelationID, e.CorrelationID())
+			assert.Nil(t, e.CausationID())
 			assert.Equal(t, StatusPending, e.Status())
 			assert.Equal(t, 0, e.RetryCount())
 			assert.False(t, e.NextSendAt().IsZero())
+		}
+	})
+
+	t.Run("success with causation id", func(t *testing.T) {
+		input := validNewEntryInput()
+		causationID := "cause-1"
+		input.CausationID = &causationID
+		e, err := NewEntry(input)
+		assert.NoError(t, err)
+		if assert.NotNil(t, e) {
+			assert.Equal(t, &causationID, e.CausationID())
 		}
 	})
 }
@@ -84,14 +116,18 @@ func TestEntryFromPersistence(t *testing.T) {
 	nextSendAt := time.Now().Add(time.Minute)
 	createdAt := time.Now().Add(-time.Hour)
 
-	e := EntryFromPersistence(id, "WagerTransaction", aggregateID, "WagerTransactionProcessed", []byte(`{}`), occurredAt, StatusPending, 2, nextSendAt, createdAt)
+	causationID := "cause-1"
+	e := EntryFromPersistence(id, "WagerTransaction", aggregateID, "WagerTransactionProcessed", 1, []byte(`{}`), occurredAt, "corr-1", &causationID, StatusPending, 2, nextSendAt, createdAt)
 
 	assert.Equal(t, id, e.ID())
 	assert.Equal(t, "WagerTransaction", e.AggregateType())
 	assert.Equal(t, aggregateID, e.AggregateID())
 	assert.Equal(t, "WagerTransactionProcessed", e.EventType())
+	assert.Equal(t, 1, e.Version())
 	assert.Equal(t, []byte(`{}`), e.Payload())
 	assert.Equal(t, occurredAt, e.OccurredAt())
+	assert.Equal(t, "corr-1", e.CorrelationID())
+	assert.Equal(t, &causationID, e.CausationID())
 	assert.Equal(t, StatusPending, e.Status())
 	assert.Equal(t, 2, e.RetryCount())
 	assert.Equal(t, nextSendAt, e.NextSendAt())

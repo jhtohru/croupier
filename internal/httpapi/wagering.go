@@ -37,7 +37,7 @@ type wagerTransactionResponse struct {
 	WalletID                       uuid.UUID         `json:"walletId"`
 	RoundID                        string            `json:"roundId,omitempty"`
 	GameID                         string            `json:"gameId,omitempty"`
-	Amount                         money.Money       `json:"amount"`
+	Money                          money.Money       `json:"money"`
 	ReferenceExternalTransactionID *string           `json:"referenceExternalTransactionId,omitempty"`
 	ReferenceTransactionID         *uuid.UUID        `json:"referenceTransactionId,omitempty"`
 	FailureCode                    wager.FailureCode `json:"failureCode,omitempty"`
@@ -56,7 +56,7 @@ func newWagerTransactionResponse(tx *wager.Transaction) wagerTransactionResponse
 		WalletID:                       tx.WalletID(),
 		RoundID:                        tx.RoundID(),
 		GameID:                         tx.GameID(),
-		Amount:                         tx.Amount(),
+		Money:                          tx.Amount(),
 		ReferenceExternalTransactionID: tx.ReferenceExternalTransactionID(),
 		ReferenceTransactionID:         tx.ReferenceTransactionID(),
 		FailureCode:                    tx.FailureCode(),
@@ -69,7 +69,9 @@ func newWagerTransactionResponse(tx *wager.Transaction) wagerTransactionResponse
 // caller's own verified token (see requireAuth/claimsFromContext), never
 // from something the client writes into its own request body. A provider
 // asserting someone else's providerId in a body field is exactly the kind
-// of cross-provider leak Fase 9 exists to close.
+// of cross-provider leak Fase 9 exists to close. The amount field is named
+// "money" (not "amount") to match the challenge spec's contract literally
+// (§9's example body embeds `"money": {"amount": "...", "currency": "..."}`).
 type submitWagerTransactionRequest struct {
 	ExternalTransactionID          string      `json:"externalTransactionId"`
 	PlayerID                       uuid.UUID   `json:"playerId"`
@@ -77,14 +79,20 @@ type submitWagerTransactionRequest struct {
 	RoundID                        string      `json:"roundId"`
 	GameID                         string      `json:"gameId"`
 	Kind                           wager.Kind  `json:"kind"`
-	Amount                         money.Money `json:"amount"`
+	Money                          money.Money `json:"money"`
 	ReferenceExternalTransactionID *string     `json:"referenceExternalTransactionId,omitempty"`
 }
 
+// submitWagerTransactionResponse matches the challenge spec's §9 example
+// response literally: a flat {transactionId, status, balance,
+// idempotentReplay}, not a nested transaction object. GET endpoints below
+// still return the richer wagerTransactionResponse — the spec only dictates
+// this exact flat shape for the submission response.
 type submitWagerTransactionResponse struct {
-	Transaction      wagerTransactionResponse `json:"transaction"`
-	Balance          money.Money              `json:"balance"`
-	IdempotentReplay bool                     `json:"idempotentReplay"`
+	TransactionID    uuid.UUID      `json:"transactionId"`
+	Status           wager.TxStatus `json:"status"`
+	Balance          money.Money    `json:"balance"`
+	IdempotentReplay bool           `json:"idempotentReplay"`
 }
 
 // submitWagerTransaction is the shared HTTP entry point for provider-
@@ -94,12 +102,15 @@ type submitWagerTransactionResponse struct {
 // providerId is the authenticated caller's own, from requireAuth — see the
 // note on submitWagerTransactionRequest.
 //
-// The Idempotency-Key header, when present, is cross-checked against
-// providerId:externalTransactionId — this is a client-facing consistency
-// check, not the idempotency mechanism itself (Submit already derives its
-// own key regardless of any header; see the Fase 5 note in TODO.md). The
-// header is optional: its absence doesn't weaken idempotency, only loses
-// this extra check.
+// The Idempotency-Key header is mandatory (challenge spec §9: "O header
+// Idempotency-Key é obrigatório") and is cross-checked against
+// providerId:externalTransactionId — a client-facing consistency check, not
+// the idempotency mechanism itself (Submit already derives its own key from
+// the body regardless of the header's value; see the Fase 5 note in
+// TODO.md, and the spec's own "uma operação financeira identificada por
+// (providerId, externalTransactionId) não pode ser reaplicada usando outra
+// chave" — the pair is the real identity, the header is a consistency
+// check on top of it, not a second source of truth).
 func (h *handler) submitWagerTransaction(w http.ResponseWriter, r *http.Request) {
 	var req submitWagerTransactionRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -108,11 +119,14 @@ func (h *handler) submitWagerTransaction(w http.ResponseWriter, r *http.Request)
 	}
 	providerID := claimsFromContext(r.Context()).ProviderID
 
-	if key := r.Header.Get("Idempotency-Key"); key != "" {
-		if want := providerID + ":" + req.ExternalTransactionID; key != want {
-			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "Idempotency-Key does not match providerId:externalTransactionId"})
-			return
-		}
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "Idempotency-Key header is required"})
+		return
+	}
+	if want := providerID + ":" + req.ExternalTransactionID; key != want {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "Idempotency-Key does not match providerId:externalTransactionId"})
+		return
 	}
 
 	result, err := h.deps.WagerSubmitter.Submit(r.Context(), app.SubmitWagerTransactionInput{
@@ -123,8 +137,9 @@ func (h *handler) submitWagerTransaction(w http.ResponseWriter, r *http.Request)
 		RoundID:                        req.RoundID,
 		GameID:                         req.GameID,
 		Kind:                           req.Kind,
-		Amount:                         req.Amount,
+		Amount:                         req.Money,
 		ReferenceExternalTransactionID: req.ReferenceExternalTransactionID,
+		CorrelationID:                  correlationIDFromContext(r.Context()),
 	})
 	if err != nil {
 		writeError(r.Context(), w, err, "walletId", req.WalletID, "externalTransactionId", req.ExternalTransactionID)
@@ -134,7 +149,8 @@ func (h *handler) submitWagerTransaction(w http.ResponseWriter, r *http.Request)
 		h.deps.Metrics.ObserveWagerSubmission(string(req.Kind), wagerOutcome(result))
 	}
 	writeJSON(w, http.StatusOK, submitWagerTransactionResponse{
-		Transaction:      newWagerTransactionResponse(result.Transaction),
+		TransactionID:    result.Transaction.ID(),
+		Status:           result.Transaction.Status(),
 		Balance:          result.Balance,
 		IdempotentReplay: result.IdempotentReplay,
 	})

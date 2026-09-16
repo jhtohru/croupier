@@ -35,6 +35,10 @@ func NewWalletCreator(
 type CreateWalletInput struct {
 	PlayerID       uuid.UUID
 	InitialBalance money.Money
+	// CorrelationID identifies the HTTP request that caused this creation —
+	// required only when InitialBalance is non-zero (that's the only case
+	// that emits outbox events at all; see Create below).
+	CorrelationID string
 }
 
 func (wc *WalletCreator) Create(ctx context.Context, input CreateWalletInput) (*wallet.Wallet, error) {
@@ -81,11 +85,12 @@ func (wc *WalletCreator) Create(ctx context.Context, input CreateWalletInput) (*
 		return nil, err
 	}
 
-	processedEvent, err := newWagerTransactionProcessedEvent(tx)
+	processedEvent, err := newWagerTransactionProcessedEvent(tx, input.CorrelationID)
 	if err != nil {
 		return nil, err
 	}
-	balanceChangedEvent, err := newWalletBalanceChangedEvent(w, entry)
+	processedEventID := processedEvent.ID().String()
+	balanceChangedEvent, err := newWalletBalanceChangedEvent(w, entry, input.CorrelationID, &processedEventID)
 	if err != nil {
 		return nil, err
 	}

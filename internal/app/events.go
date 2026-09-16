@@ -24,13 +24,19 @@ const (
 	EventTypeWalletBalanceChanged             = "WalletBalanceChanged"
 )
 
+// eventEnvelopeVersion is the schema version for every event type below —
+// bump the specific event's call sites (not this shared constant) the day
+// one of these payloads actually needs a breaking change; there's no
+// version history yet, so every event starts at 1.
+const eventEnvelopeVersion = 1
+
 type wagerTransactionProcessedData struct {
 	TransactionID uuid.UUID   `json:"transactionId"`
 	Kind          wager.Kind  `json:"kind"`
 	Amount        money.Money `json:"amount"`
 }
 
-func newWagerTransactionProcessedEvent(tx *wager.Transaction) (*outbox.Entry, error) {
+func newWagerTransactionProcessedEvent(tx *wager.Transaction, correlationID string) (*outbox.Entry, error) {
 	payload, err := json.Marshal(wagerTransactionProcessedData{
 		TransactionID: tx.ID(),
 		Kind:          tx.Kind(),
@@ -43,8 +49,10 @@ func newWagerTransactionProcessedEvent(tx *wager.Transaction) (*outbox.Entry, er
 		AggregateType: "WagerTransaction",
 		AggregateID:   tx.ID(),
 		EventType:     EventTypeWagerTransactionProcessed,
+		Version:       eventEnvelopeVersion,
 		Payload:       payload,
 		OccurredAt:    time.Now(),
+		CorrelationID: correlationID,
 	})
 }
 
@@ -54,7 +62,7 @@ type wagerTransactionRejectedData struct {
 	FailureCode   wager.FailureCode `json:"failureCode"`
 }
 
-func newWagerTransactionRejectedEvent(tx *wager.Transaction) (*outbox.Entry, error) {
+func newWagerTransactionRejectedEvent(tx *wager.Transaction, correlationID string) (*outbox.Entry, error) {
 	payload, err := json.Marshal(wagerTransactionRejectedData{
 		TransactionID: tx.ID(),
 		Kind:          tx.Kind(),
@@ -67,8 +75,10 @@ func newWagerTransactionRejectedEvent(tx *wager.Transaction) (*outbox.Entry, err
 		AggregateType: "WagerTransaction",
 		AggregateID:   tx.ID(),
 		EventType:     EventTypeWagerTransactionRejected,
+		Version:       eventEnvelopeVersion,
 		Payload:       payload,
 		OccurredAt:    time.Now(),
+		CorrelationID: correlationID,
 	})
 }
 
@@ -77,7 +87,7 @@ type wagerTransactionPendingReferenceData struct {
 	ReferenceExternalTransactionID string    `json:"referenceExternalTransactionId"`
 }
 
-func newWagerTransactionPendingReferenceEvent(tx *wager.Transaction) (*outbox.Entry, error) {
+func newWagerTransactionPendingReferenceEvent(tx *wager.Transaction, correlationID string) (*outbox.Entry, error) {
 	var refExtID string
 	if tx.ReferenceExternalTransactionID() != nil {
 		refExtID = *tx.ReferenceExternalTransactionID()
@@ -93,8 +103,10 @@ func newWagerTransactionPendingReferenceEvent(tx *wager.Transaction) (*outbox.En
 		AggregateType: "WagerTransaction",
 		AggregateID:   tx.ID(),
 		EventType:     EventTypeWagerTransactionPendingReference,
+		Version:       eventEnvelopeVersion,
 		Payload:       payload,
 		OccurredAt:    time.Now(),
+		CorrelationID: correlationID,
 	})
 }
 
@@ -108,7 +120,15 @@ type walletBalanceChangedData struct {
 	WalletVersion int64            `json:"walletVersion"`
 }
 
-func newWalletBalanceChangedEvent(w *wallet.Wallet, entry *wallet.LedgerEntry) (*outbox.Entry, error) {
+// newWalletBalanceChangedEvent's causationID, when given, is the id of the
+// sibling WagerTransactionProcessed event emitted in the very same call
+// (process(), in wager_submit.go, and Create(), in wallet_create.go) — a
+// precise causal link ("this balance change happened because that specific
+// event happened"), not just the broader request-level correlationId every
+// event from the same call already shares. Optional per the challenge spec
+// (§11: "causationId opcional"); nil when there's no more specific sibling
+// event to point to.
+func newWalletBalanceChangedEvent(w *wallet.Wallet, entry *wallet.LedgerEntry, correlationID string, causationID *string) (*outbox.Entry, error) {
 	payload, err := json.Marshal(walletBalanceChangedData{
 		WalletID:      w.ID(),
 		TransactionID: entry.TransactionID(),
@@ -125,7 +145,10 @@ func newWalletBalanceChangedEvent(w *wallet.Wallet, entry *wallet.LedgerEntry) (
 		AggregateType: "Wallet",
 		AggregateID:   w.ID(),
 		EventType:     EventTypeWalletBalanceChanged,
+		Version:       eventEnvelopeVersion,
 		Payload:       payload,
 		OccurredAt:    time.Now(),
+		CorrelationID: correlationID,
+		CausationID:   causationID,
 	})
 }

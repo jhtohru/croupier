@@ -11,10 +11,13 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/jhtohru/croupier/internal/app"
 )
 
 type txKey struct{}
@@ -25,6 +28,56 @@ type querier interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// wrapTransientErr classifies err via pgconn.SafeToRetry — true means the
+// failure happened before any data reached the server (a dial/connection
+// failure, not anything about the query itself) — and wraps it in
+// app.ErrUnavailable when so, letting internal/httpapi's writeError map it
+// to 503 instead of a generic 500 (challenge spec §9's "indisponibilidade
+// transitória" must be distinguishable by contract). Every other error
+// (including pgx.ErrNoRows — a successful round trip, not a connectivity
+// failure) passes through unchanged.
+func wrapTransientErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if pgconn.SafeToRetry(err) {
+		return fmt.Errorf("%w: %w", app.ErrUnavailable, err)
+	}
+	return err
+}
+
+// wrappingQuerier decorates a querier so every error it returns has already
+// passed through wrapTransientErr — the one place this happens, so no
+// individual repository method needs to remember to call it.
+type wrappingQuerier struct {
+	inner querier
+}
+
+func (q wrappingQuerier) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	tag, err := q.inner.Exec(ctx, sql, args...)
+	return tag, wrapTransientErr(err)
+}
+
+func (q wrappingQuerier) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	rows, err := q.inner.Query(ctx, sql, args...)
+	return rows, wrapTransientErr(err)
+}
+
+func (q wrappingQuerier) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return wrappingRow{inner: q.inner.QueryRow(ctx, sql, args...)}
+}
+
+// wrappingRow exists because QueryRow itself never returns an error —
+// pgx.Row defers that to Scan, so that's where wrapTransientErr has to hook
+// in for the QueryRow path.
+type wrappingRow struct {
+	inner pgx.Row
+}
+
+func (r wrappingRow) Scan(dest ...any) error {
+	return wrapTransientErr(r.inner.Scan(dest...))
 }
 
 // TxManager runs repository calls within a single Postgres transaction.
@@ -39,7 +92,7 @@ func NewTxManager(pool *pgxpool.Pool) *TxManager {
 func (m *TxManager) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
 	tx, err := m.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return wrapTransientErr(err)
 	}
 	defer tx.Rollback(ctx) // no-op once committed
 
@@ -47,7 +100,7 @@ func (m *TxManager) WithinTx(ctx context.Context, fn func(ctx context.Context) e
 	if err := fn(ctx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return wrapTransientErr(tx.Commit(ctx))
 }
 
 func txFromContext(ctx context.Context) (pgx.Tx, bool) {
@@ -57,7 +110,7 @@ func txFromContext(ctx context.Context) (pgx.Tx, bool) {
 
 func dbFor(ctx context.Context, pool *pgxpool.Pool) querier {
 	if tx, ok := txFromContext(ctx); ok {
-		return tx
+		return wrappingQuerier{inner: tx}
 	}
-	return pool
+	return wrappingQuerier{inner: pool}
 }

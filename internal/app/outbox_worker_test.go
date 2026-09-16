@@ -27,7 +27,8 @@ func newTestEntry(t *testing.T) *outbox.Entry {
 	t.Helper()
 	e, err := outbox.NewEntry(outbox.NewEntryInput{
 		AggregateType: "Wallet", AggregateID: uuid.New(),
-		EventType: "WalletBalanceChanged", Payload: []byte(`{}`), OccurredAt: time.Now(),
+		EventType: "WalletBalanceChanged", Version: 1, Payload: []byte(`{}`), OccurredAt: time.Now(),
+		CorrelationID: "test-correlation-id",
 	})
 	require.NoError(t, err)
 	return e
