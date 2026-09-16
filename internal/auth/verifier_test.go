@@ -88,6 +88,20 @@ func TestVerifierAgainstRealKeycloak(t *testing.T) {
 		assert.NotEqual(t, http.StatusOK, resp.StatusCode)
 	})
 
+	t.Run("expired token is rejected", func(t *testing.T) {
+		// Challenge spec §13.27: "rejeição de credenciais... expiradas."
+		// provider-short-lived (deploy/keycloak/realm-export.json) exists
+		// only for this test — access.token.lifespan=2s, a per-client
+		// override that leaves every other client's normal 300s realm
+		// default untouched, so this doesn't slow down or change behavior
+		// for anything else in this suite.
+		token := fetchToken(t, "provider-short-lived", "provider-short-lived-secret")
+		time.Sleep(3 * time.Second)
+
+		_, err := verifier.Verify(context.Background(), token)
+		assert.ErrorIs(t, err, auth.ErrInvalidToken)
+	})
+
 	t.Run("malformed token is rejected", func(t *testing.T) {
 		_, err := verifier.Verify(context.Background(), "not-a-jwt")
 		assert.ErrorIs(t, err, auth.ErrInvalidToken)

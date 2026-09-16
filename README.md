@@ -100,13 +100,15 @@ Automática — não precisa configurar nada manualmente no admin console. Suba 
 docker compose up -d keycloak
 ```
 
-`deploy/keycloak/realm-export.json` é importado sozinho no start do container (`--import-realm`) e provisiona o realm `croupier` com três identidades de teste (`client_credentials`, service-to-service — sem fluxo de usuário/senha):
+`deploy/keycloak/realm-export.json` é importado sozinho no start do container (`--import-realm`) e provisiona o realm `croupier` com identidades de teste (`client_credentials`, service-to-service — sem fluxo de usuário/senha):
 
 | Client            | Secret                     | Papel                                                              |
 |-------------------|----------------------------|---------------------------------------------------------------------|
 | `provider-a`      | `provider-a-secret`        | Provider — token carrega `providerId: "provider-a"`                |
 | `provider-b`      | `provider-b-secret`        | Provider — token carrega `providerId: "provider-b"`                 |
 | `internal-service`| `internal-service-secret`  | Uso interno — token carrega a role de realm `internal-service`      |
+
+Também existe `provider-short-lived`/`provider-short-lived-secret`, usado só por `internal/auth/verifier_test.go` (token expira em 2s, via override `access.token.lifespan` desse client — não afeta os 5 minutos dos demais) — não é um client pra uso manual.
 
 Obter um token (válido por 5 minutos):
 ```sh
