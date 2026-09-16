@@ -4,7 +4,34 @@ Decisões técnicas do croupier. Preenchido incrementalmente conforme o [TODO.md
 
 ## Visão geral
 
-_(a preencher — diagrama/descrição geral do fluxo provider → wager → wallet → ledger → outbox, ao final das Fases 1-5)_
+```
+                         HTTP (internal/httpapi)
+provider/serviço interno ───────────────┐
+                                         ▼
+                              internal/app (casos de uso)
+                                 WalletCreator, WagerSubmitter,
+                                 WalletReconciler, PendingReferenceResolver
+                                         │
+                    ┌────────────────────┼────────────────────┐
+                    ▼                    ▼                    ▼
+              internal/wallet      internal/wager        internal/outbox
+              (Wallet, Ledger)   (WagerTransaction)      (Entry PENDING/
+                    │                    │                PUBLISHED)
+                    └──────────┬─────────┘                    │
+                                ▼                              ▼
+                        internal/postgres (pgx)         internal/sqs.Publisher
+                        1 transação: estado +                  │
+                        saldo + ledger + outbox                ▼
+                                                        wallet-events.fifo
+provider ──── SQS (wager-transactions.fifo) ──▶ internal/sqs.Consumer
+                                                (internal/inbox dedup)
+                                                        │
+                                                        ▼
+                                          mesmo internal/app.WagerSubmitter
+                                          usado pela rota HTTP
+```
+
+Duas portas de entrada (HTTP e SQS) convergem no mesmo caso de uso (`app.WagerSubmitter.Submit`) — garantias de idempotência/isolamento por provider idênticas nos dois caminhos, por construção, não por coincidência (ver "Mensageria (SQS)" abaixo). Toda mutação de estado (wallet, ledger, wager transaction) e o registro do evento de domínio correspondente (`outbox`) commitam juntos, na mesma transação Postgres — a publicação de fato na fila (`internal/sqs.Publisher`, via `OutboxWorker`) é sempre um passo **posterior**, assíncrono, nunca parte da transação que gerou o evento (ver "Publisher + OutboxWorker" abaixo, e a entrada correspondente em "Falhas desqualificantes"). `cmd/croupier` é o único ponto do projeto que conhece tipo concreto de infraestrutura e monta esse grafo inteiro via Uber Fx — ver "Composição (Uber Fx) e ciclo de vida".
 
 ## Representação de dinheiro (Money)
 
@@ -261,13 +288,25 @@ _(Fase 11)_
 
 ## Limitações, interpretações e trabalho incompleto
 
-_(Fase 13 — revisão final)_
+Todo item da lista "Falhas desqualificantes" no TODO.md foi revisado nesta revisão final e nenhum se aplica — ver TODO.md → "Falhas desqualificantes" pra a lista e as seções deste documento referenciadas na Fase 12 pra onde cada um foi verificado contra infraestrutura real. O que segue aqui é o que ficou deliberadamente incompleto ou foi decidido por interpretação própria (enunciado original não especificava), não desqualificante, mas honesto de registrar:
+
+**Observabilidade (Fase 11) não foi implementada além do mínimo que já existia por consequência de outras fases.** `slog` já é usado em pontos-chave (`cmd/croupier/lifecycle.go`, `internal/sqs/consumer.go`, `internal/httpapi/errors.go`) com campos estruturados (`error`, `name`, ...), mas: (1) o handler é o default do Go (texto, não JSON); (2) não há injeção sistemática de `correlationId`/`messageId`/`transactionId`/`walletId`/`providerId` em todo log relevante, só nos poucos pontos citados; (3) não existe nenhuma métrica (contadores de outcome, duplicata, retry, DLQ, conflito de concorrência, latência de outbox, divergência de reconciliação) nem tracing OpenTelemetry nem dashboard. Cortado deliberadamente sob pressão de prazo, priorizando (conforme a legenda do próprio TODO.md) os itens `[!]` da Fase 12 — que exigiram, inclusive, uma correção de bug real de concorrência (ver "Instruções de teste" → "Testes de integração") — sobre os itens `[~]`/`[o]` desta fase.
+
+**DLQ não verificada de ponta a ponta.** Documentado também em "Mensageria (SQS)" → "O que foi verificado de verdade": a redrive policy (`maxReceiveCount=5` → `wager-transactions-dlq.fifo`) está provisionada e testada por leitura de configuração, mas nenhum teste força de fato 5 falhas consecutivas da mesma mensagem e observa ela cair na DLQ real. Exigiria uma forma determinística de fazer `Submit` falhar repetidamente pra uma mensagem específica (ex.: apontar temporariamente pra um Postgres fora do ar) que não se encaixou no formato das suítes existentes sem introduzir infraestrutura só pra esse teste.
+
+**Expiração de token não testada com espera real** (`internal/auth`, Fase 9): `accessTokenLifespan` do realm é 300s; o mecanismo de checagem de `exp` é o mesmo caminho de código já exercitado pelos testes de assinatura/emissor inválidos, então o ganho de esperar 5 minutos de verdade numa suíte de teste não pareceu valer o custo de tempo. Se algum dia importar mais especificamente, um realm de teste dedicado com `accessTokenLifespan` curto resolveria sem impactar as demais suítes.
+
+**Diferenciais opcionais não implementados** (`[o]`, Fase 13): double-entry bookkeeping completo (o ledger atual já é auditável e imutável — trigger de banco bloqueia `UPDATE`/`DELETE` — mas não modela contrapartida dupla de fato, só entradas de débito/crédito por wallet) e load testing com métricas p50/p95/p99. Nenhum dos dois é necessário pra nenhum requisito obrigatório do desafio.
+
+**Interpretações registradas ao longo do projeto** (cada uma já documentada na seção correspondente, listadas aqui só pra consolidar): nomes de fila (`wager-transactions.fifo`, `wallet-events.fifo`) e o formato do envelope de evento (`{eventId, aggregateType, aggregateId, eventType, occurredAt, data}`) não especificados no enunciado original — ver "Mensageria (SQS)"; `providerId` extraído via protocol mapper dedicado no token em vez de reaproveitar `azp`/`client_id` — ver "Autenticação e Autorização"; "restringir wallet a uso interno" resolvido via role de realm, não por lista de client id — mesma seção; recovery de outbox abandonado resolvido inteiramente pelo lock da consulta (`FOR UPDATE SKIP LOCKED`), sem coluna de lease/`claimedUntil` — ver "Mensageria (SQS)" → "Publisher + OutboxWorker".
+
+**Refatorações cosméticas de baixa prioridade não feitas** (`[o]`, Fase 1): `money_test.go` ainda não segue o padrão de teste de tabela adotado a partir da Fase 2, e ainda repete o literal `"BRL"` em vez de uma constante local — comportamento e cobertura de teste não são afetados, só estilo.
 
 ## Instruções de teste
 
 ### Preparo do ambiente
 
-_(Fase 13)_
+Passos operacionais (pré-requisitos, variáveis de ambiente, `docker compose up`, migrations, filas, Keycloak) já estão no README.md — "Pré-requisitos", "Variáveis de ambiente", "Subindo o ambiente local (Docker Compose)", "Migrations", "Inicialização das filas", "Autenticação (IdP / Keycloak)". Esta seção documenta só o **porquê** por trás de decisões de teste que não cabem no README; passo a passo de comando fica lá, pra não duplicar em dois lugares e arriscar os dois divergirem.
 
 ### Testes de integração
 

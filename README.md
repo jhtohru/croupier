@@ -189,8 +189,7 @@ curl -s localhost:8080/health/ready   # 503 se Postgres estiver inacessível
 
 ## Rodando os testes
 
-_(a preencher por completo na Fase 13)_
-
+Testes unitários (sem infraestrutura nenhuma — repositórios fake/in-memory) e `go vet`:
 ```sh
 go test ./...
 go test -race ./...

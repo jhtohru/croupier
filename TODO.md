@@ -11,7 +11,7 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 ---
 
 ## Fase 0 — Setup do projeto
-- [ ] `[!]` Estrutura de pacotes por aggregate/conceito (não por camada arquitetural) — convenção definida abaixo; cada diretório é criado naturalmente ao escrever o primeiro arquivo da fase correspondente (não há pacote vazio pré-criado em Go):
+- [x] `[!]` Estrutura de pacotes por aggregate/conceito (não por camada arquitetural) — convenção definida abaixo, seguida à risca em todas as fases; cada diretório foi criado naturalmente ao escrever o primeiro arquivo da fase correspondente (não há pacote vazio pré-criado em Go), mais `internal/testdb` (Fase 12, bootstrap de banco de teste) além da lista original:
   ```
   internal/
     money/     // Money (já existe)
@@ -93,18 +93,18 @@ Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]
 - [x] `[!]` `POST /wallets`, `GET /wallets/:walletId`, `GET /wallets/:walletId/ledger?cursor=&limit=`, `POST /wallets/:walletId/reconciliation` — `net/http` puro (stdlib `ServeMux` do Go 1.22+, sem framework de roteamento); DTOs próprios em `internal/httpapi`, não os tipos de domínio direto (`money.Money` é reaproveitado como está, já tem `MarshalJSON`/`UnmarshalJSON` no formato `{"amount":"...","currency":"..."}`)
 - [x] `[!]` `POST /wagering/transactions` (header `Idempotency-Key`), `GET /wagering/transactions/:transactionId`, `GET /providers/:providerId/wagering/transactions/:externalTransactionId` — `Idempotency-Key`, quando presente, é conferido contra `providerId:externalTransactionId` do corpo (checagem de consistência client-facing; o mecanismo de idempotência em si já é só do corpo, via `WagerSubmitter.Submit`, header ausente não enfraquece nada — ver nota da Fase 5)
 - [x] `[!]` `GET /health/live` (sempre 200, sem checar nada), `GET /health/ready` — só Postgres por enquanto via `Deps.Ready func(ctx) error` injetado (SQS entra na Fase 8, sem mudar `internal/httpapi`)
-- [ ] `[!]` Middleware de autenticação/autorização (ver Fase 9) aplicado às rotas de negócio — **ainda não existe**: `providerId` nas rotas de wagering vem direto do path/corpo informado pelo cliente, não de identidade autenticada; documentado como limitação conhecida em `NewServer` e aqui — é o único ponto que a Fase 9 precisa fechar, nenhum handler deve precisar mudar
+- [x] `[!]` Middleware de autenticação/autorização (ver Fase 9) aplicado às rotas de negócio — fechado na Fase 9 (`requireAuth`/`requireInternalRole`, `internal/httpapi/auth.go`): `providerId` passou a vir de `claimsFromContext(r.Context()).ProviderID`, nunca de path/corpo informado pelo cliente; exatamente como previsto aqui, nenhum handler de negócio mudou de estrutura
 - [x] `[!]` Testes de integração HTTP — com Postgres real (`internal/httpapi/integration_test.go`, `//go:build integration`, roda `TestWagerLifecycleOverHTTP` fim-a-fim: cria wallet → submete BET → replay idempotente → submete WIN → consulta por id/por provider → lista ledger → concilia, tudo via HTTP de verdade contra Postgres real); IdP real fica pra depois da Fase 9 (não existe ainda)
 - [x] `[doc]` README.md → "Exemplos de chamadas"
 
 ## Fase 8 — internal/sqs
 - [x] `[!]` Filas `wager-transactions.fifo` + `wager-transactions-dlq.fifo` com redrive policy — provisionadas automaticamente pelo próprio LocalStack via `deploy/localstack/init-queues.sh` (hook `ready.d`, roda no start do container, bloqueia o healthcheck até terminar); `maxReceiveCount=5` na redrive policy. Adicionada também `wallet-events.fifo` (fila de saída, ver "Mensageria (SQS)" no ARCHITECTURE.md — nome não especificado no enunciado original, interpretação registrada lá)
 - [x] `[!]` Consumer: dedup por `messageId` + hash do payload via inbox; remove da fila só após commit durável — implementado em `internal/sqs.Consumer`. Reentra em `WagerSubmitter.Submit` (mesmo caminho do HTTP); a proteção real contra duplicidade é a idempotência do próprio `Submit` por `providerId:externalTransactionId` (Fase 5) — o Inbox é uma camada extra mais barata, não o mecanismo primário, então uma corrida entre "Submit terminou" e "Inbox marcado completo" nunca é insegura (só reprocessa, e reprocessar é seguro)
-- [ ] `[!]` Retry com backoff; erros permanentes → DLQ — retry vem inteiramente do próprio mecanismo do SQS (visibility timeout expira → redelivery automática) e da redrive policy (`maxReceiveCount=5` → DLQ), não de um backoff próprio na aplicação: decisão deliberada de não reinventar o que a fila já garante. **Não verificado de ponta a ponta ainda** (forçar uma mensagem a falhar 5x e observar ela cair na DLQ de verdade) — fica pra Fase 12, que já tem cenário obrigatório dedicado pra isso
-- [ ] `[!]` Shutdown gracioso (SIGTERM): parar de puxar mensagens, terminar in-flight dentro do deadline ou liberar para redelivery — `Consumer.Run` já respeita cancelamento de `ctx` (verificado em teste unitário) e deixa uma mensagem em processamento terminar antes de checar `ctx` de novo; falta só o handler de `SIGTERM` de verdade, que é trabalho da Fase 10 (`cmd/croupier`), não deste pacote
+- [ ] `[!]` Retry com backoff; erros permanentes → DLQ — retry vem inteiramente do próprio mecanismo do SQS (visibility timeout expira → redelivery automática) e da redrive policy (`maxReceiveCount=5` → DLQ), não de um backoff próprio na aplicação: decisão deliberada de não reinventar o que a fila já garante. **Ainda não verificado de ponta a ponta** (forçar uma mensagem a falhar 5x e observar ela cair na DLQ de verdade): a Fase 12 fechou o resto dos cenários obrigatórios mas não este — ficou registrado como limitação conhecida em ARCHITECTURE.md → "Limitações, interpretações e trabalho incompleto" em vez de resolvido
+- [x] `[!]` Shutdown gracioso (SIGTERM): parar de puxar mensagens, terminar in-flight dentro do deadline ou liberar para redelivery — `Consumer.Run` já respeita cancelamento de `ctx` (verificado em teste unitário) e deixa uma mensagem em processamento terminar antes de checar `ctx` de novo; o handler de `SIGTERM` de verdade (`fx.App.Done()` + `registerBackgroundLoop`) foi fechado na Fase 10, verificado com `SIGTERM` real contra o binário rodando (ver ARCHITECTURE.md → "Graceful shutdown")
 - [x] `[!]` Outbox worker: publica eventos pós-commit, suporta múltiplos publishers, recovery de trabalho abandonado, republicação preservando eventId — `app.OutboxWorker.RunOnce` + `internal/sqs.Publisher`. "Múltiplos publishers"/"recovery de trabalho abandonado" vêm do lock de linha (`SELECT ... FOR UPDATE SKIP LOCKED` em `OutboxRepository.FindDueForUpdate`) dentro de uma transação — verificado com Postgres real e duas goroutines concorrentes disputando duas entradas (nunca pegam a mesma). "Republicação preservando eventId" vem do `id` da linha nunca mudar entre tentativas, incluído no envelope da mensagem
 - [x] `[!]` LocalStack no docker-compose para execução local — já estava rodando (Fase 10 anterior); agora também provisiona as filas automaticamente
-- [ ] `[!]` Testes de integração: redelivery após interrupção pós-commit/pré-ack, DLQ, recovery pós-restart — redelivery-após-interrupção coberto por teste unitário (`TestConsumerHandle/redelivery_of_already-completed_work_does_not_resubmit`, simula exatamente esse cenário) e pelo fluxo real ponta-a-ponta (`TestConsumerConsumesRealSQSMessage`, `TestPublisherAndOutboxWorkerOverRealSQS`, ambos contra LocalStack+Postgres reais). DLQ e recovery-pós-restart de verdade (matar o processo no meio, reiniciar, confirmar que nada duplicou/perdeu) ainda não têm teste dedicado — coincide com o escopo da Fase 12 (suíte de cenários obrigatórios de concorrência/recuperação), fica pra lá
+- [ ] `[!]` Testes de integração: redelivery após interrupção pós-commit/pré-ack, DLQ, recovery pós-restart — redelivery-após-interrupção coberto por teste unitário (`TestConsumerHandle/redelivery_of_already-completed_work_does_not_resubmit`) e por SQS real (`TestConsumerRedeliveryAfterCommitBeforeDelete`, Fase 12); recovery-pós-restart verificado manualmente contra o app containerizado de verdade (Fase 12, ver ARCHITECTURE.md → "Instruções de teste"). **Só a DLQ de ponta a ponta continua sem teste** — mesma limitação do item de retry/DLQ acima
 - [x] `[doc]` README.md → "Inicialização das filas"; ARCHITECTURE.md → "Mensageria (SQS)", detalhar "Inbox / Outbox"
 
 ## Fase 9 — internal/auth
@@ -150,23 +150,23 @@ Priorizada antes da Fase 11 (Observabilidade, `[~]`/`[o]`): todo item aqui é `[
 - [x] `[doc]` ARCHITECTURE.md → "Instruções de teste" (simulando múltiplas instâncias, simulando falhas)
 
 ## Fase 13 — Checklist final
-- [ ] `[!]` `gofmt` aplicado em tudo
-- [ ] `[!]` `go vet ./...` limpo
-- [ ] `[!]` `go test ./...` e `go test -race ./...` passando
-- [ ] `[!]` Revisar lista de "falhas desqualificantes" do desafio uma a uma antes de entregar
-- [ ] `[doc]` ARCHITECTURE.md → "Limitações, interpretações e trabalho incompleto"; revisão final de README.md/ARCHITECTURE.md por consistência
-- [ ] `[o]` Diferenciais: double-entry bookkeeping completo, load testing com métricas (p50/p95/p99)
+- [x] `[!]` `gofmt` aplicado em tudo — `gofmt -l .` sem saída
+- [x] `[!]` `go vet ./...` limpo — com e sem `-tags integration`
+- [x] `[!]` `go test ./...` e `go test -race ./...` passando — todos os pacotes, unit e integration (`-tags integration`), rodados com o serviço `app` de pé (ver ARCHITECTURE.md → "Instruções de teste")
+- [x] `[!]` Revisar lista de "falhas desqualificantes" do desafio uma a uma antes de entregar — ver anotações abaixo, nenhuma se aplica
+- [x] `[doc]` ARCHITECTURE.md → "Limitações, interpretações e trabalho incompleto"; revisão final de README.md/ARCHITECTURE.md por consistência — placeholders remanescentes ("Visão geral", "Preparo do ambiente") preenchidos
+- [ ] `[o]` Diferenciais: double-entry bookkeeping completo, load testing com métricas (p50/p95/p99) — cortado por prazo, ver ARCHITECTURE.md → "Limitações, interpretações e trabalho incompleto"
 
 ---
 
 ## Falhas desqualificantes (revisar antes de entregar)
-- Ausência de autenticação efetiva em endpoints de negócio
-- Acesso não autorizado a operações/transações de outro provider
-- Cálculo de dinheiro usando float
-- Saldo negativo via concorrência
-- Movimento duplicado
-- Idempotência apenas em memória
-- Correção depender de uma única instância
-- Publicação de evento antes do commit
-- Ledger não auditável (edição/remoção de entradas)
-- Testes com mock completo substituindo Postgres/SQS/IdP
+- [x] Ausência de autenticação efetiva em endpoints de negócio — `requireAuth`/`requireInternalRole` gateiam toda rota exceto `/health/*` (Fase 9)
+- [x] Acesso não autorizado a operações/transações de outro provider — `providerId` do path vs. do token, `403` se não bater; verificado com dois clients reais (Fase 9)
+- [x] Cálculo de dinheiro usando float — `grep -rn "float32\|float64"` em código não-teste não retorna nada; `Money` é `int64` em unidade mínima (Fase 1)
+- [x] Saldo negativo via concorrência — lock pessimista (`SELECT ... FOR UPDATE`) + `CHECK (balance >= 0)` como backstop de schema (Fase 5/6), reprovado sob concorrência real (Fase 12)
+- [x] Movimento duplicado — idempotência por `providerId:externalTransactionId` persistida no Postgres, reforçada por Inbox no consumer SQS (Fase 5/8), corrigida sob concorrência real na Fase 12 (`TestWagerSubmitterConcurrentDuplicateSubmissions`)
+- [x] Idempotência apenas em memória — chave de idempotência é `UNIQUE` na tabela `wager_transactions`, nunca só em processo (Fase 6)
+- [x] Correção depender de uma única instância — `TestConcurrentBetsAcrossMultipleAppInstances`, 3 instâncias independentes disputando a mesma wallet, corretude só via lock do Postgres (Fase 12)
+- [x] Publicação de evento antes do commit — outbox transacional: evento gravado na mesma transação do estado/saldo/ledger, publicação de fato é sempre um passo posterior assíncrono (`OutboxWorker`) — ver ARCHITECTURE.md → "Visão geral", "Mensageria (SQS)" (Fase 6/8)
+- [x] Ledger não auditável (edição/remoção de entradas) — trigger `BEFORE UPDATE OR DELETE` em `wallet_ledger_entries` rejeita no próprio Postgres, testado de verdade (Fase 6)
+- [x] Testes com mock completo substituindo Postgres/SQS/IdP — todo cenário obrigatório de concorrência/recuperação (Fase 12) e as suítes de auth/httpapi/sqs (Fase 7/8/9) têm teste de integração dedicado contra infraestrutura real; fakes só cobrem lógica de caso de uso isolada, sempre pareados com uma suíte real equivalente
