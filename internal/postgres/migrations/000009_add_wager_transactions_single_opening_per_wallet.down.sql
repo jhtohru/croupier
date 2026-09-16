@@ -1,0 +1,1 @@
+DROP INDEX wager_transactions_single_opening_per_wallet_idx;

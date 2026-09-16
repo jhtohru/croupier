@@ -105,7 +105,39 @@ func TestWagerRepositoryRoundTrip(t *testing.T) {
 	assert.ErrorIs(t, err, app.ErrWagerTransactionNotFound)
 }
 
-func TestWagerRepositoryTwoOpeningTransactionsCoexist(t *testing.T) {
+func TestWagerRepositoryOpeningTransactionsForDifferentWalletsCoexist(t *testing.T) {
+	pool := testPool(t)
+	walletRepo := postgres.NewWalletRepository(pool)
+	wagerRepo := postgres.NewWagerRepository(pool)
+
+	balance, err := money.FromMinorUnits("BRL", 1000)
+	require.NoError(t, err)
+
+	// Two OPENING rows, one per wallet, both with NULL
+	// provider_id/external_transaction_id — must not collide on
+	// wager_transactions_provider_external_unique (a plain UNIQUE treats
+	// each NULL as distinct, so this works; the point of this test is
+	// confirming that holds against a real Postgres, not just in theory).
+	for i := 0; i < 2; i++ {
+		w, err := wallet.New(uuid.New(), balance)
+		require.NoError(t, err)
+		require.NoError(t, walletRepo.Save(context.Background(), w))
+
+		opening, err := wager.NewOpeningTransaction(wager.NewOpeningInput{
+			PlayerID: w.PlayerID(), WalletID: w.ID(), Amount: balance,
+		})
+		require.NoError(t, err)
+		require.NoError(t, wagerRepo.Save(context.Background(), opening))
+	}
+}
+
+// TestWagerRepositorySecondOpeningForSameWalletRejected proves the schema
+// itself enforces challenge spec §6.3.23 ("O schema deve impedir crédito
+// inicial duplicado"), not just application discipline —
+// wager_transactions_single_opening_per_wallet_idx (migration 000009)
+// rejects a second OPENING row for a wallet_id that already has one, even
+// via a direct repository call that bypasses WalletCreator entirely.
+func TestWagerRepositorySecondOpeningForSameWalletRejected(t *testing.T) {
 	pool := testPool(t)
 	walletRepo := postgres.NewWalletRepository(pool)
 	wagerRepo := postgres.NewWagerRepository(pool)
@@ -116,15 +148,18 @@ func TestWagerRepositoryTwoOpeningTransactionsCoexist(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, walletRepo.Save(context.Background(), w))
 
-	for i := 0; i < 2; i++ {
-		opening, err := wager.NewOpeningTransaction(wager.NewOpeningInput{
-			PlayerID: w.PlayerID(), WalletID: w.ID(), Amount: balance,
-		})
-		require.NoError(t, err)
-		// Two OPENING rows both have NULL provider_id/external_transaction_id
-		// — must not collide on the unique constraint.
-		require.NoError(t, wagerRepo.Save(context.Background(), opening))
-	}
+	first, err := wager.NewOpeningTransaction(wager.NewOpeningInput{
+		PlayerID: w.PlayerID(), WalletID: w.ID(), Amount: balance,
+	})
+	require.NoError(t, err)
+	require.NoError(t, wagerRepo.Save(context.Background(), first))
+
+	second, err := wager.NewOpeningTransaction(wager.NewOpeningInput{
+		PlayerID: w.PlayerID(), WalletID: w.ID(), Amount: balance,
+	})
+	require.NoError(t, err)
+	err = wagerRepo.Save(context.Background(), second)
+	assert.ErrorContains(t, err, "wager_transactions_single_opening_per_wallet_idx")
 }
 
 // TestWagerSubmitterConcurrentDuplicateSubmissions is the other mandatory
