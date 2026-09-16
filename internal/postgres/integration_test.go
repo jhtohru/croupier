@@ -250,9 +250,16 @@ func TestWagerSubmitterConcurrentBets(t *testing.T) {
 
 	balance, err := money.FromMinorUnits("BRL", 10000)
 	require.NoError(t, err)
-	w, err := wallet.New(uuid.New(), balance)
+	// Created through WalletCreator (not wallet.New + Save directly) so the
+	// initial balance has its OPENING ledger entry — required for §13.42's
+	// reconciliation assertion below to mean anything: without it, the
+	// ledger would only ever record the bet, never where the money
+	// initially came from.
+	creator := app.NewWalletCreator(walletRepo, wagerRepo, outboxRepo, txManager)
+	w, err := creator.Create(context.Background(), app.CreateWalletInput{
+		PlayerID: uuid.New(), InitialBalance: balance, CorrelationID: "test-correlation-id",
+	})
 	require.NoError(t, err)
-	require.NoError(t, walletRepo.Save(context.Background(), w))
 
 	submitter := app.NewWagerSubmitter(walletRepo, wagerRepo, outboxRepo, txManager)
 
@@ -301,8 +308,21 @@ func TestWagerSubmitterConcurrentBets(t *testing.T) {
 
 	entries, err := walletRepo.AllLedgerEntries(context.Background(), w.ID())
 	require.NoError(t, err)
-	assert.Len(t, entries, 1)
-	assert.Equal(t, wallet.DirectionDebit, entries[0].Direction())
+	// 2 entries, not 1: the OPENING credit (from WalletCreator.Create above)
+	// plus this test's one winning bet's debit.
+	if assert.Len(t, entries, 2) {
+		assert.Equal(t, wallet.DirectionCredit, entries[0].Direction()) // OPENING
+		assert.Equal(t, wallet.DirectionDebit, entries[1].Direction())  // the winning BET
+	}
+
+	// Challenge spec §13.42: "Ao final, confira o saldo armazenado contra a
+	// soma de créditos menos débitos do ledger" — WalletReconciler.Reconcile
+	// does exactly that computation, so use it directly instead of
+	// reimplementing the sum here.
+	reconciler := app.NewWalletReconciler(walletRepo, txManager)
+	reconciliation, err := reconciler.Reconcile(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.True(t, reconciliation.Consistent, "stored balance should equal ledger credits minus debits")
 }
 
 // TestWalletRepositoryFindByIDLocksPerRowNotGlobally is the mandatory
@@ -390,12 +410,18 @@ func TestConcurrentBetsAcrossMultipleAppInstances(t *testing.T) {
 		instances[i] = newInstance()
 	}
 
-	walletRepo := postgres.NewWalletRepository(testPool(t))
+	sharedPool := testPool(t)
+	walletRepo := postgres.NewWalletRepository(sharedPool)
+	sharedTxManager := postgres.NewTxManager(sharedPool)
 	balance, err := money.FromMinorUnits("BRL", 10000)
 	require.NoError(t, err)
-	w, err := wallet.New(uuid.New(), balance)
+	// Created through WalletCreator so the initial balance has its OPENING
+	// ledger entry — see the same note in TestWagerSubmitterConcurrentBets.
+	creator := app.NewWalletCreator(walletRepo, postgres.NewWagerRepository(sharedPool), postgres.NewOutboxRepository(sharedPool), sharedTxManager)
+	w, err := creator.Create(context.Background(), app.CreateWalletInput{
+		PlayerID: uuid.New(), InitialBalance: balance, CorrelationID: "test-correlation-id",
+	})
 	require.NoError(t, err)
-	require.NoError(t, walletRepo.Save(context.Background(), w))
 
 	betAmount, err := money.FromMinorUnits("BRL", 8000)
 	require.NoError(t, err)
@@ -441,6 +467,12 @@ func TestConcurrentBetsAcrossMultipleAppInstances(t *testing.T) {
 	wantBalance, err := money.FromMinorUnits("BRL", 2000)
 	require.NoError(t, err)
 	assert.Equal(t, wantBalance, final.Balance())
+
+	// Challenge spec §13.42, same as the two-instance scenario above.
+	reconciler := app.NewWalletReconciler(walletRepo, sharedTxManager)
+	reconciliation, err := reconciler.Reconcile(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.True(t, reconciliation.Consistent, "stored balance should equal ledger credits minus debits")
 }
 
 // drainOutboxBacklog claims and marks published every currently-due PENDING
@@ -642,6 +674,61 @@ func TestPendingReferenceResolverRealPostgres(t *testing.T) {
 	finalWallet, err := walletRepo.FindByID(context.Background(), w.ID())
 	require.NoError(t, err)
 	assert.Equal(t, balance, finalWallet.Balance()) // BET debited 3000, REFUND credited it back
+}
+
+// TestPendingReferenceResolverRealPostgresRollback covers the same
+// mandatory scenario as the REFUND test above, but for ROLLBACK (challenge
+// spec §13.39: "Entregue ROLLBACK antes da referência e comprove a
+// resolução posterior") — the resolver's retry mechanism itself is already
+// exercised in detail above and in
+// internal/app/pending_reference_resolver_test.go (kind-agnostic), so this
+// stays focused on what's actually different for ROLLBACK: it wasn't
+// exercised by any test at all before this, HTTP/SQS ingestion included.
+func TestPendingReferenceResolverRealPostgresRollback(t *testing.T) {
+	pool := testPool(t)
+	walletRepo := postgres.NewWalletRepository(pool)
+	wagerRepo := postgres.NewWagerRepository(pool)
+	outboxRepo := postgres.NewOutboxRepository(pool)
+	txManager := postgres.NewTxManager(pool)
+
+	balance, err := money.FromMinorUnits("BRL", 10000)
+	require.NoError(t, err)
+	w, err := wallet.New(uuid.New(), balance)
+	require.NoError(t, err)
+	require.NoError(t, walletRepo.Save(context.Background(), w))
+
+	submitter := app.NewWagerSubmitter(walletRepo, wagerRepo, outboxRepo, txManager)
+	resolver := app.NewPendingReferenceResolver(wagerRepo, submitter, 5, time.Hour, time.Minute)
+
+	providerID := "provider-" + uuid.New().String()
+	missingRefID := "bet-" + uuid.New().String()
+	rollbackResult, err := submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
+		ProviderID: providerID, ExternalTransactionID: "rollback-" + uuid.New().String(),
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindRollback, Amount: mustMoney(t, 3000), ReferenceExternalTransactionID: &missingRefID,
+		CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+	require.Equal(t, wager.TxStatusPendingReference, rollbackResult.Transaction.Status())
+
+	_, err = submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
+		ProviderID: providerID, ExternalTransactionID: missingRefID,
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindBet, Amount: mustMoney(t, 3000),
+		CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+
+	_, err = resolver.ResolveDue(context.Background(), time.Now(), 10)
+	require.NoError(t, err)
+
+	resolved, err := wagerRepo.FindByID(context.Background(), rollbackResult.Transaction.ID())
+	require.NoError(t, err)
+	assert.Equal(t, wager.TxStatusProcessed, resolved.Status())
+
+	finalWallet, err := walletRepo.FindByID(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.Equal(t, balance, finalWallet.Balance()) // BET debited 3000, ROLLBACK credited it back
 }
 
 func TestInboxRepositoryRoundTrip(t *testing.T) {
