@@ -25,10 +25,14 @@ DLQ_ARN=$(awslocal sqs get-queue-attributes --queue-url "$DLQ_URL" --attribute-n
 # the outer --attributes JSON document.
 REDRIVE_POLICY=$(printf '{"deadLetterTargetArn":"%s","maxReceiveCount":"5"}' "$DLQ_ARN")
 REDRIVE_POLICY_ESCAPED=$(printf '%s' "$REDRIVE_POLICY" | sed 's/"/\\"/g')
-ATTRS=$(printf '{"FifoQueue":"true","ContentBasedDeduplication":"true","RedrivePolicy":"%s"}' "$REDRIVE_POLICY_ESCAPED")
+# VisibilityTimeout=30 (SQS's own default — spelled out explicitly here so
+# it's documented, not just inherited silently; see challenge spec §10.13
+# and ARCHITECTURE.md's "Mensageria (SQS)" for why 30s is enough headroom
+# for handle()). maxReceiveCount=5: a message that fails processing 5 times
+# moves to the DLQ instead of retrying forever — see Fase 8/Fase 12 in
+# TODO.md.
+ATTRS=$(printf '{"FifoQueue":"true","ContentBasedDeduplication":"true","VisibilityTimeout":"30","RedrivePolicy":"%s"}' "$REDRIVE_POLICY_ESCAPED")
 
-# maxReceiveCount=5: a message that fails processing 5 times moves to the
-# DLQ instead of retrying forever — see Fase 8/Fase 12 in TODO.md.
 awslocal sqs create-queue \
   --queue-name "$QUEUE_NAME" \
   --attributes "$ATTRS"
