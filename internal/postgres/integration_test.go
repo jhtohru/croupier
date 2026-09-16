@@ -731,6 +731,113 @@ func TestPendingReferenceResolverRealPostgresRollback(t *testing.T) {
 	assert.Equal(t, balance, finalWallet.Balance()) // BET debited 3000, ROLLBACK credited it back
 }
 
+// TestRestartRecoveryPreservesIdempotencyPendingReferencesAndConsistency is
+// the mandatory §13.23/§13.40 scenario: "Reinicie a aplicação e verifique
+// que idempotência, pendências e consistência financeira foram
+// preservadas." Previously only verified once, by hand, against the
+// containerized app (ARCHITECTURE.md → "Instruções de teste"). Nothing this
+// application does keeps state in memory across a restart by design (every
+// other mandatory scenario — 50 concurrent identical submissions, 3+
+// independent instances — already relies on that same property, using
+// fresh Go objects sharing only Postgres to stand in for "another
+// process"), so a real process restart isn't needed to prove it: this test
+// builds one set of repositories/submitter/resolver ("before restart"),
+// does some work, then builds a **second, entirely separate** set from the
+// same Postgres ("after restart" — no Go value shared between the two) and
+// continues from there.
+func TestRestartRecoveryPreservesIdempotencyPendingReferencesAndConsistency(t *testing.T) {
+	pool := testPool(t)
+
+	// "Before restart."
+	walletRepo1 := postgres.NewWalletRepository(pool)
+	wagerRepo1 := postgres.NewWagerRepository(pool)
+	outboxRepo1 := postgres.NewOutboxRepository(pool)
+	txManager1 := postgres.NewTxManager(pool)
+	creator1 := app.NewWalletCreator(walletRepo1, wagerRepo1, outboxRepo1, txManager1)
+	submitter1 := app.NewWagerSubmitter(walletRepo1, wagerRepo1, outboxRepo1, txManager1)
+
+	balance, err := money.FromMinorUnits("BRL", 10000)
+	require.NoError(t, err)
+	w, err := creator1.Create(context.Background(), app.CreateWalletInput{
+		PlayerID: uuid.New(), InitialBalance: balance, CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+
+	providerID := "provider-" + uuid.New().String()
+	betExternalID := "bet-" + uuid.New().String()
+	betResult, err := submitter1.Submit(context.Background(), app.SubmitWagerTransactionInput{
+		ProviderID: providerID, ExternalTransactionID: betExternalID,
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindBet, Amount: mustMoney(t, 3000),
+		CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+	require.Equal(t, wager.TxStatusProcessed, betResult.Transaction.Status())
+
+	// A reversal referencing a BET that hasn't arrived yet — parks as
+	// PENDING_REFERENCE, exactly like a real submission still waiting when
+	// the process restarts would.
+	missingRefID := "refund-target-" + uuid.New().String()
+	refundResult, err := submitter1.Submit(context.Background(), app.SubmitWagerTransactionInput{
+		ProviderID: providerID, ExternalTransactionID: "refund-" + uuid.New().String(),
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindRefund, Amount: mustMoney(t, 1000), ReferenceExternalTransactionID: &missingRefID,
+		CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+	require.Equal(t, wager.TxStatusPendingReference, refundResult.Transaction.Status())
+
+	// "Restart": a wholly separate set of repositories/services, sharing no
+	// Go value with the ones above — only the same Postgres.
+	walletRepo2 := postgres.NewWalletRepository(pool)
+	wagerRepo2 := postgres.NewWagerRepository(pool)
+	outboxRepo2 := postgres.NewOutboxRepository(pool)
+	txManager2 := postgres.NewTxManager(pool)
+	submitter2 := app.NewWagerSubmitter(walletRepo2, wagerRepo2, outboxRepo2, txManager2)
+	resolver2 := app.NewPendingReferenceResolver(wagerRepo2, submitter2, 5, time.Hour, time.Minute)
+	reconciler2 := app.NewWalletReconciler(walletRepo2, txManager2)
+
+	// Idempotência preservada: replaying the original BET after "restart"
+	// must return the exact same transaction and balance, not reprocess it.
+	replay, err := submitter2.Submit(context.Background(), app.SubmitWagerTransactionInput{
+		ProviderID: providerID, ExternalTransactionID: betExternalID,
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindBet, Amount: mustMoney(t, 3000),
+		CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+	assert.True(t, replay.IdempotentReplay)
+	assert.Equal(t, betResult.Transaction.ID(), replay.Transaction.ID())
+	assert.Equal(t, betResult.Balance, replay.Balance)
+
+	// Pendências preservadas: the still-PENDING_REFERENCE row is still
+	// there, findable by the new instance, and the resolver can still
+	// pick it up and complete it once its reference finally arrives.
+	stillPending, err := wagerRepo2.FindByID(context.Background(), refundResult.Transaction.ID())
+	require.NoError(t, err)
+	assert.Equal(t, wager.TxStatusPendingReference, stillPending.Status())
+
+	_, err = submitter2.Submit(context.Background(), app.SubmitWagerTransactionInput{
+		ProviderID: providerID, ExternalTransactionID: missingRefID,
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindBet, Amount: mustMoney(t, 1000),
+		CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+	_, err = resolver2.ResolveDue(context.Background(), time.Now(), 10)
+	require.NoError(t, err)
+	resolved, err := wagerRepo2.FindByID(context.Background(), refundResult.Transaction.ID())
+	require.NoError(t, err)
+	assert.Equal(t, wager.TxStatusProcessed, resolved.Status())
+
+	// Consistência financeira preservada: the stored balance still agrees
+	// with the ledger after all of the above, read entirely through the
+	// "post-restart" instance.
+	reconciliation, err := reconciler2.Reconcile(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.True(t, reconciliation.Consistent, "stored balance should equal ledger credits minus debits after restart")
+}
+
 func TestInboxRepositoryRoundTrip(t *testing.T) {
 	pool := testPool(t)
 	repo := postgres.NewInboxRepository(pool)

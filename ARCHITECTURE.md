@@ -404,6 +404,8 @@ Não dá pra publicar todos na mesma porta do host (`APP_PORT` colidiria) — pr
 
 ### Simulando falhas (kill, restart, interrupção)
 
+**Recuperação após reinicialização, automatizada** (challenge spec §13.23/§13.40 — `internal/postgres/integration_test.go`, `TestRestartRecoveryPreservesIdempotencyPendingReferencesAndConsistency`): o roteiro manual abaixo continua documentado como forma de reproduzir contra o binário/containers reais, mas a verificação repetível por `go test` não depende de reiniciar um processo de verdade — nenhum estado deste app sobrevive em memória entre chamadas por design (a mesma propriedade que já sustenta os cenários obrigatórios de múltiplas instâncias), então "reiniciar" é simulado com um segundo conjunto de repositórios/serviços que não compartilha nenhum valor Go com o primeiro, só o mesmo Postgres. O teste prova, através desse "pós-restart": idempotência (replay do `BET` original devolve a mesma transação/saldo, não reprocessa), pendências (a linha `PENDING_REFERENCE` continua lá e o resolver da nova instância consegue completá-la assim que a referência chega) e consistência financeira (`WalletReconciler.Reconcile` bate no final).
+
 **Reiniciar o app com trabalho pendente** — passos reproduzíveis, exatamente como verificado nesta sessão (ver TODO.md, Fase 12):
 ```sh
 # 1. Cria uma wallet e submete um REFUND referenciando um BET que ainda não existe
