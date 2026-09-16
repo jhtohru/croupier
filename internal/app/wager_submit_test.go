@@ -126,6 +126,24 @@ func TestWagerSubmitterSubmit(t *testing.T) {
 		assert.Len(t, env.outbox.entries, 1) // only WagerTransactionProcessed, no balance change
 	})
 
+	t.Run("loss with mismatched currency is rejected", func(t *testing.T) {
+		// Challenge spec §7.23: "LOSS continua exigindo a moeda da
+		// carteira" — LOSS never touches the wallet's balance, so this
+		// can't rely on Wallet.Credit/Debit's own currency check like
+		// every other kind does; it needs its own.
+		env, w := newSubmitTestEnv(t, 1000)
+		amount, err := money.Zero("USD")
+		require.NoError(t, err)
+
+		_, err = env.submitter.Submit(context.Background(), SubmitWagerTransactionInput{
+			ProviderID: "provider-a", ExternalTransactionID: "loss-1",
+			PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+			Kind: wager.KindLoss, Amount: amount, CorrelationID: "test-correlation-id",
+		})
+
+		assert.ErrorIs(t, err, money.ErrCurrencyMismatch)
+	})
+
 	t.Run("refund success", func(t *testing.T) {
 		env, w := newSubmitTestEnv(t, 10000)
 
@@ -203,6 +221,35 @@ func TestWagerSubmitterSubmit(t *testing.T) {
 			ProviderID: "provider-a", ExternalTransactionID: "refund-2",
 			PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
 			Kind: wager.KindRefund, Amount: mustAmount(t, 3000), ReferenceExternalTransactionID: &refID,
+		})
+
+		assert.Equal(t, wager.TxStatusRejected, result.Transaction.Status())
+		assert.Equal(t, FailureCodeDuplicateReversal, result.Transaction.FailureCode())
+	})
+
+	t.Run("rollback after a processed refund on the same reference is rejected", func(t *testing.T) {
+		// Challenge spec §7.26: a REFUND and a ROLLBACK on the same BET must
+		// not both succeed, or the same debit gets returned twice. This is
+		// the cross-kind case — FindReversal must reject regardless of
+		// which reversal kind came first.
+		env, w := newSubmitTestEnv(t, 10000)
+
+		mustSubmit(t, env, SubmitWagerTransactionInput{
+			ProviderID: "provider-a", ExternalTransactionID: "bet-1",
+			PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+			Kind: wager.KindBet, Amount: mustAmount(t, 3000),
+		})
+		refID := "bet-1"
+		mustSubmit(t, env, SubmitWagerTransactionInput{
+			ProviderID: "provider-a", ExternalTransactionID: "refund-1",
+			PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+			Kind: wager.KindRefund, Amount: mustAmount(t, 3000), ReferenceExternalTransactionID: &refID,
+		})
+
+		result := mustSubmit(t, env, SubmitWagerTransactionInput{
+			ProviderID: "provider-a", ExternalTransactionID: "rollback-1",
+			PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+			Kind: wager.KindRollback, Amount: mustAmount(t, 3000), ReferenceExternalTransactionID: &refID,
 		})
 
 		assert.Equal(t, wager.TxStatusRejected, result.Transaction.Status())

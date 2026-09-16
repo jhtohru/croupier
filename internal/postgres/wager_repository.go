@@ -89,9 +89,9 @@ func (r *WagerRepository) FindByProviderAndExternalID(ctx context.Context, provi
 	return tx, err
 }
 
-func (r *WagerRepository) FindReversal(ctx context.Context, referencedTransactionID uuid.UUID, kind wager.Kind) (*wager.Transaction, error) {
-	q := wagerTransactionSelect + " WHERE reference_transaction_id = $1 AND kind = $2 AND status = $3"
-	tx, err := scanWagerTransaction(dbFor(ctx, r.pool).QueryRow(ctx, q, referencedTransactionID, string(kind), string(wager.TxStatusProcessed)))
+func (r *WagerRepository) FindReversal(ctx context.Context, referencedTransactionID uuid.UUID) (*wager.Transaction, error) {
+	q := wagerTransactionSelect + " WHERE reference_transaction_id = $1 AND kind IN ($2, $3) AND status = $4"
+	tx, err := scanWagerTransaction(dbFor(ctx, r.pool).QueryRow(ctx, q, referencedTransactionID, string(wager.KindRefund), string(wager.KindRollback), string(wager.TxStatusProcessed)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, app.ErrWagerTransactionNotFound
 	}

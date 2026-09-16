@@ -146,9 +146,9 @@ func (r *fakeWagerRepository) FindByProviderAndExternalID(ctx context.Context, p
 	return nil, ErrWagerTransactionNotFound
 }
 
-func (r *fakeWagerRepository) FindReversal(ctx context.Context, referencedTransactionID uuid.UUID, kind wager.Kind) (*wager.Transaction, error) {
+func (r *fakeWagerRepository) FindReversal(ctx context.Context, referencedTransactionID uuid.UUID) (*wager.Transaction, error) {
 	for _, tx := range r.transactions {
-		if tx.Kind() == kind &&
+		if (tx.Kind() == wager.KindRefund || tx.Kind() == wager.KindRollback) &&
 			tx.Status() == wager.TxStatusProcessed &&
 			tx.ReferenceTransactionID() != nil &&
 			*tx.ReferenceTransactionID() == referencedTransactionID {

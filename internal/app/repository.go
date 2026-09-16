@@ -67,10 +67,13 @@ type WagerRepository interface {
 	Save(ctx context.Context, tx *wager.Transaction) error
 	FindByID(ctx context.Context, id uuid.UUID) (*wager.Transaction, error)
 	FindByProviderAndExternalID(ctx context.Context, providerID, externalTransactionID string) (*wager.Transaction, error)
-	// FindReversal looks up an existing PROCESSED transaction of kind (REFUND
-	// or ROLLBACK) already pointing at referencedTransactionID, used to
-	// prevent applying the same kind of reversal twice against one reference.
-	FindReversal(ctx context.Context, referencedTransactionID uuid.UUID, kind wager.Kind) (*wager.Transaction, error)
+	// FindReversal looks up an existing PROCESSED reversal (REFUND or
+	// ROLLBACK, regardless of which) already pointing at
+	// referencedTransactionID, used to prevent applying a second reversal —
+	// of either kind — against one reference (challenge spec §7.26:
+	// REFUND followed by ROLLBACK on the same BET, or vice versa, would
+	// otherwise double the money returned for one debit).
+	FindReversal(ctx context.Context, referencedTransactionID uuid.UUID) (*wager.Transaction, error)
 	// FindDuePendingReferences returns up to limit PENDING_REFERENCE
 	// transactions whose retry schedule is due at or before now — a
 	// transaction never scheduled yet counts as immediately due. Used by

@@ -164,7 +164,7 @@ func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction, co
 		if err := tx.ResolveReference(referenced.ID()); err != nil {
 			return nil, err
 		}
-		duplicate, err := ws.wagers.FindReversal(ctx, referenced.ID(), tx.Kind())
+		duplicate, err := ws.wagers.FindReversal(ctx, referenced.ID())
 		if err != nil && !errors.Is(err, ErrWagerTransactionNotFound) {
 			return nil, err
 		}
@@ -332,6 +332,20 @@ func (ws *WagerSubmitter) reject(ctx context.Context, tx *wager.Transaction, cod
 }
 
 func (ws *WagerSubmitter) finishWithoutMovement(ctx context.Context, tx *wager.Transaction, correlationID string) (*SubmitWagerTransactionResult, error) {
+	// LOSS never calls Wallet.Credit/Debit (no movement), so it never goes
+	// through Money.Add/Subtract's own currency check the way every other
+	// kind does — checked explicitly here instead (challenge spec §7.23:
+	// "LOSS continua exigindo a moeda da carteira"). Same error
+	// (money.ErrCurrencyMismatch) and same 400 mapping (internal/httpapi's
+	// validationErrors) as a currency mismatch on any other kind.
+	w, err := ws.wallets.FindByID(ctx, tx.WalletID())
+	if err != nil {
+		return nil, err
+	}
+	if tx.Amount().Currency() != w.Balance().Currency() {
+		return nil, money.ErrCurrencyMismatch
+	}
+
 	if err := tx.MarkProcessed(); err != nil {
 		return nil, err
 	}
