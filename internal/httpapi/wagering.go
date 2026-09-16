@@ -88,11 +88,17 @@ type submitWagerTransactionRequest struct {
 // idempotentReplay}, not a nested transaction object. GET endpoints below
 // still return the richer wagerTransactionResponse — the spec only dictates
 // this exact flat shape for the submission response.
+//
+// FailureCode isn't in the spec's own example (a PROCESSED example has none
+// to show), but §7.36 requires every rejection to "fornecer um failureCode
+// estável e documentado" — omitted (omitempty) outside REJECTED, so it
+// stays absent for the shape the spec does show.
 type submitWagerTransactionResponse struct {
-	TransactionID    uuid.UUID      `json:"transactionId"`
-	Status           wager.TxStatus `json:"status"`
-	Balance          money.Money    `json:"balance"`
-	IdempotentReplay bool           `json:"idempotentReplay"`
+	TransactionID    uuid.UUID         `json:"transactionId"`
+	Status           wager.TxStatus    `json:"status"`
+	Balance          money.Money       `json:"balance"`
+	IdempotentReplay bool              `json:"idempotentReplay"`
+	FailureCode      wager.FailureCode `json:"failureCode,omitempty"`
 }
 
 // submitWagerTransaction is the shared HTTP entry point for provider-
@@ -153,6 +159,7 @@ func (h *handler) submitWagerTransaction(w http.ResponseWriter, r *http.Request)
 		Status:           result.Transaction.Status(),
 		Balance:          result.Balance,
 		IdempotentReplay: result.IdempotentReplay,
+		FailureCode:      result.Transaction.FailureCode(),
 	})
 }
 

@@ -78,6 +78,26 @@ func TestSubmitWagerTransaction(t *testing.T) {
 		assert.Equal(t, tx.ProviderID(), submitter.gotInput.ProviderID)
 	})
 
+	t.Run("business rejection includes failureCode in the response body", func(t *testing.T) {
+		// Challenge spec §7.36: "Toda rejeição deve fornecer um failureCode
+		// estável e documentado" — the submission response (not just the
+		// separate GET) must carry it.
+		tx := mustTransaction(t, betInput(t))
+		require.NoError(t, tx.MarkRejected(wager.FailureCode("INSUFFICIENT_BALANCE")))
+		submitter := &stubWagerSubmitter{result: &app.SubmitWagerTransactionResult{
+			Transaction: tx, Balance: mustMoney(t, "20.00"),
+		}}
+		srv := NewServer(Deps{Auth: providerAuth(tx.ProviderID()), WagerSubmitter: submitter})
+
+		rec := doWagerRequest(t, srv, requestFromTx(tx), tx.ProviderID())
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var got submitWagerTransactionResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		assert.Equal(t, wager.TxStatusRejected, got.Status)
+		assert.Equal(t, wager.FailureCode("INSUFFICIENT_BALANCE"), got.FailureCode)
+	})
+
 	t.Run("missing Idempotency-Key maps to 400", func(t *testing.T) {
 		submitter := &stubWagerSubmitter{}
 		srv := NewServer(Deps{Auth: providerAuth("provider-a"), WagerSubmitter: submitter})
