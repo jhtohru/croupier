@@ -14,7 +14,7 @@ import (
 func TestWalletReconcilerReconcile(t *testing.T) {
 	t.Run("wallet not found", func(t *testing.T) {
 		wallets := newFakeWalletRepository()
-		r := NewWalletReconciler(wallets)
+		r := NewWalletReconciler(wallets, fakeTxManager{})
 
 		result, err := r.Reconcile(context.Background(), uuid.New())
 		assert.ErrorIs(t, err, ErrWalletNotFound)
@@ -35,7 +35,7 @@ func TestWalletReconcilerReconcile(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		r := NewWalletReconciler(wallets)
+		r := NewWalletReconciler(wallets, fakeTxManager{})
 		result, err := r.Reconcile(context.Background(), w.ID())
 		assert.NoError(t, err)
 		assert.True(t, result.Consistent)
@@ -108,7 +108,7 @@ func TestWalletReconcilerReconcile(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		r := NewWalletReconciler(wallets)
+		r := NewWalletReconciler(wallets, fakeTxManager{})
 		result, err := r.Reconcile(context.Background(), w.ID())
 		assert.NoError(t, err)
 		assert.True(t, result.Consistent)
@@ -160,7 +160,7 @@ func TestWalletReconcilerReconcile(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		r := NewWalletReconciler(wallets)
+		r := NewWalletReconciler(wallets, fakeTxManager{})
 		result, err := r.Reconcile(context.Background(), w.ID())
 		assert.NoError(t, err)
 		assert.False(t, result.Consistent)

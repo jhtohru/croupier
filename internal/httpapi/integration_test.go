@@ -81,7 +81,7 @@ func testServer(t *testing.T) *Server {
 	return NewServer(Deps{
 		WalletCreator:          app.NewWalletCreator(wallets, wagers, outbox, txManager),
 		WalletGetter:           app.NewWalletGetter(wallets),
-		WalletReconciler:       app.NewWalletReconciler(wallets),
+		WalletReconciler:       app.NewWalletReconciler(wallets, txManager),
 		WalletLedgerLister:     app.NewWalletLedgerLister(wallets),
 		WagerSubmitter:         app.NewWagerSubmitter(wallets, wagers, outbox, txManager),
 		WagerTransactionGetter: app.NewWagerTransactionGetter(wagers),
