@@ -93,6 +93,25 @@ O healthcheck do serviço só reporta "healthy" depois que o script termina, ent
 docker exec <container-do-localstack> awslocal sqs list-queues
 ```
 
+**Publicando em `wager-transactions.fifo` diretamente** (em vez de `POST /wagering/transactions`): é uma fila FIFO, então toda mensagem exige `MessageGroupId`. Use o `walletId` da submissão — mensagens da mesma carteira mantêm ordem entre si; carteiras diferentes processam em paralelo (mesma lógica de particionamento que `internal/sqs.Publisher` já usa do lado de saída, ver ARCHITECTURE.md → "Mensageria (SQS)"). `MessageDeduplicationId` não precisa ser setado explicitamente — a fila tem `ContentBasedDeduplication=true` (hash do corpo); a deduplicação de verdade contra reentrega/reenvio é sempre feita pela aplicação via `messageId` do envelope (§10 do enunciado), não pelo SQS:
+```sh
+docker exec <container-do-localstack> awslocal sqs send-message \
+  --queue-url http://localhost:4566/000000000000/wager-transactions.fifo \
+  --message-group-id "<walletId>" \
+  --message-body '{
+    "messageId": "<uuid>",
+    "type": "WagerTransactionRequested",
+    "occurredAt": "2026-01-01T00:00:00.000Z",
+    "data": {
+      "providerId": "provider-a", "externalTransactionId": "ext-1",
+      "idempotencyKey": "provider-a:ext-1",
+      "playerId": "<playerId>", "walletId": "<walletId>",
+      "roundId": "round-1", "gameId": "game-1",
+      "kind": "BET", "money": {"amount":"30.00","currency":"BRL"}
+    }
+  }'
+```
+
 ## Autenticação (IdP / Keycloak)
 
 Automática — não precisa configurar nada manualmente no admin console. Suba o Keycloak:
