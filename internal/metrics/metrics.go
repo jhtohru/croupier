@@ -37,7 +37,8 @@ type Registry struct {
 
 	pendingReferenceResolutionsTotal *prometheus.CounterVec
 
-	sqsMessagesTotal *prometheus.CounterVec
+	sqsMessagesTotal             *prometheus.CounterVec
+	sqsMessageProcessingDuration *prometheus.HistogramVec
 
 	dlqDepth *prometheus.GaugeVec
 }
@@ -104,6 +105,17 @@ func New() *Registry {
 			Help: "SQS messages processed by the consumer, by consumer name and result (success, error).",
 		}, []string{"consumer", "result"}),
 
+		// Challenge spec §12.9's "latência de processamento" for the SQS
+		// path — croupier_http_request_duration_seconds above only covers
+		// HTTP. Measures handle() end to end (Inbox lookup through Submit
+		// through Inbox completion), regardless of outcome — a message
+		// that fails still spent that long being attempted.
+		sqsMessageProcessingDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "croupier_sqs_message_processing_duration_seconds",
+			Help:    "SQS message processing latency in seconds, by consumer name.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"consumer"}),
+
 		dlqDepth: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "croupier_sqs_dlq_depth",
 			Help: "Approximate number of messages currently in a dead-letter queue, by queue name.",
@@ -165,6 +177,10 @@ func (r *Registry) ObservePendingReferenceResolution(outcome string) {
 
 func (r *Registry) ObserveSQSMessage(consumer, result string) {
 	r.sqsMessagesTotal.WithLabelValues(consumer, result).Inc()
+}
+
+func (r *Registry) ObserveSQSMessageDuration(consumer string, duration time.Duration) {
+	r.sqsMessageProcessingDuration.WithLabelValues(consumer).Observe(duration.Seconds())
 }
 
 func (r *Registry) SetDLQDepth(queue string, depth float64) {

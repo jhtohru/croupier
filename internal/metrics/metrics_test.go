@@ -50,6 +50,17 @@ func TestRegistryObserveOutboxPublish(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "croupier_outbox_publish_latency_seconds_count 1")
 }
 
+func TestRegistryObserveSQSMessageDuration(t *testing.T) {
+	// Challenge spec §12.9 ("latência de processamento") for the SQS path.
+	r := New()
+	r.ObserveSQSMessageDuration("wager-transactions-consumer", 50*time.Millisecond)
+	r.ObserveSQSMessageDuration("wager-transactions-consumer", 0)
+
+	rec := httptest.NewRecorder()
+	r.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	assert.Contains(t, rec.Body.String(), `croupier_sqs_message_processing_duration_seconds_count{consumer="wager-transactions-consumer"} 2`)
+}
+
 func TestRegistrySetDLQDepth(t *testing.T) {
 	r := New()
 	r.SetDLQDepth("wager-transactions-dlq.fifo", 3)

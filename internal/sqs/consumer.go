@@ -83,6 +83,7 @@ type wagerTransactionMessage struct {
 type metricsRecorder interface {
 	ObserveWagerSubmission(kind, outcome string)
 	ObserveSQSMessage(consumer, result string)
+	ObserveSQSMessageDuration(consumer string, duration time.Duration)
 }
 
 type Consumer struct {
@@ -182,7 +183,13 @@ func (c *Consumer) processMessage(ctx context.Context, msg types.Message) {
 	// delivery together (Fase 11); it's per-delivery, not per-messageId, so
 	// a redelivery of the same message gets a fresh value on purpose.
 	correlationID := uuid.NewString()
-	if err := c.handle(ctx, msg, correlationID); err != nil {
+	start := time.Now()
+	err := c.handle(ctx, msg, correlationID)
+	duration := time.Since(start)
+	if c.metrics != nil {
+		c.metrics.ObserveSQSMessageDuration(c.consumerName, duration)
+	}
+	if err != nil {
 		slog.ErrorContext(ctx, "sqs consumer: message processing failed, leaving for redelivery",
 			"consumer", c.consumerName, "messageId", messageID, "correlationId", correlationID, "error", err)
 		if c.metrics != nil {
