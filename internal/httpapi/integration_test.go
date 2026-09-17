@@ -54,8 +54,8 @@ func fetchRealToken(t *testing.T, clientID, clientSecret string) string {
 }
 
 // testServer wires a real Postgres-backed, real-Keycloak-verified Server
-// exactly the way cmd/croupier (Fase 10) eventually will. No mocks anywhere
-// in this file: same real-infrastructure bar as internal/postgres's and
+// exactly the way cmd/croupier (Fase 10) does. No mocks anywhere in this
+// file: same real-infrastructure bar as internal/postgres's and
 // internal/sqs's integration tests.
 func testServer(t *testing.T) *Server {
 	t.Helper()

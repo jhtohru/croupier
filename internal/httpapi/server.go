@@ -64,9 +64,11 @@ type Deps struct {
 	WalletLedgerLister     walletLedgerLister
 	WagerSubmitter         wagerSubmitter
 	WagerTransactionGetter wagerTransactionGetter
-	// Ready is called by GET /health/ready. Only Postgres is checked for
-	// now — Fase 8 will extend whatever cmd/croupier passes in here to also
-	// check SQS, with no change needed in this package.
+	// Ready is called by GET /health/ready. This package doesn't know or
+	// care what it checks — cmd/croupier's readyChecker (Fase 8) is what
+	// checks both Postgres and SQS, passed in here as this one func value,
+	// so nothing in internal/httpapi needed to change when SQS readiness
+	// was added.
 	Ready func(ctx context.Context) error
 	// Auth verifies bearer tokens (internal/auth.Verifier satisfies this).
 	// Every route except /health/* requires one — see requireAuth and

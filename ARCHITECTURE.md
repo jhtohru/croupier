@@ -235,7 +235,7 @@ Rejeição de negócio e processamento pendente devolvem `200`, não um `4xx`/`5
 
 **Fechado na Fase 9** (ver "Autenticação e Autorização" abaixo): `requireAuth`/`requireInternalRole` (`internal/httpapi/auth.go`) gateiam toda rota exceto `/health/*`, e `providerId` nas rotas de wagering vem de `claimsFromContext(r.Context()).ProviderID` — do token, nunca de corpo/path informado pelo cliente. `submitWagerTransactionRequest` nem tem campo `providerId` mais. Exatamente como previsto aqui: nenhum handler de negócio mudou de estrutura, só a origem do valor.
 
-**Verificado contra Postgres real, não só com stubs**: `internal/httpapi/integration_test.go` (`//go:build integration`) sobe um `*Server` com repositórios Postgres de verdade e roda um fluxo completo por HTTP — cria wallet, submete BET, replay idempotente (confirma que não duplica saldo nem ledger), submete WIN, consulta por id interno e por `(providerId, externalTransactionId)`, lista ledger, concilia — tudo por cima da API HTTP real, não chamando `internal/app` direto. IdP real (pra fechar a lacuna acima) fica pra depois da Fase 9.
+**Verificado contra Postgres real, não só com stubs**: `internal/httpapi/integration_test.go` (`//go:build integration`) sobe um `*Server` com repositórios Postgres de verdade e roda um fluxo completo por HTTP — cria wallet, submete BET, replay idempotente (confirma que não duplica saldo nem ledger), submete WIN, consulta por id interno e por `(providerId, externalTransactionId)`, lista ledger, concilia — tudo por cima da API HTTP real, não chamando `internal/app` direto. Desde a Fase 9, esse mesmo arquivo também usa Keycloak real (não um stub de auth) pra emitir e verificar os tokens do fluxo — ver "Autenticação e Autorização" abaixo.
 
 ## Mensageria (SQS)
 

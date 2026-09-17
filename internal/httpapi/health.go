@@ -14,9 +14,9 @@ func (h *handler) healthLive(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 }
 
-// healthReady checks Postgres only for now — Fase 8 extends whatever
-// cmd/croupier passes as Deps.Ready to also check SQS, with no change
-// needed here.
+// healthReady defers entirely to Deps.Ready — cmd/croupier's readyChecker
+// (Fase 8) is what actually checks Postgres and SQS; this handler doesn't
+// know or care what it checks.
 func (h *handler) healthReady(w http.ResponseWriter, r *http.Request) {
 	if h.deps.Ready == nil {
 		writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
