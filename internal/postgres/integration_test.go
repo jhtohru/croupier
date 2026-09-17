@@ -325,6 +325,126 @@ func TestWagerSubmitterConcurrentBets(t *testing.T) {
 	assert.True(t, reconciliation.Consistent, "stored balance should equal ledger credits minus debits")
 }
 
+// TestWagerSubmitterConcurrentReversals proves challenge spec §7.25/§7.26
+// (a reference must never receive two successful reversals, of the same
+// kind or different ones) holds under real concurrency, not just when one
+// reversal is fully committed before the next is submitted. A REFUND and a
+// ROLLBACK against the same processed BET are submitted from two goroutines
+// at once: WagerRepository.FindReversal's check has to run inside the
+// wallet's row lock to mean anything here — done before any lock is held,
+// both goroutines could see "no reversal yet" and both proceed, doubling
+// the money returned for one debit (exactly the bug §7.26's earlier fix
+// closed for the sequential case, but not, until now, for this one).
+func TestWagerSubmitterConcurrentReversals(t *testing.T) {
+	pool := testPool(t)
+	walletRepo := postgres.NewWalletRepository(pool)
+	wagerRepo := postgres.NewWagerRepository(pool)
+	outboxRepo := postgres.NewOutboxRepository(pool)
+	txManager := postgres.NewTxManager(pool)
+
+	balance, err := money.FromMinorUnits("BRL", 10000)
+	require.NoError(t, err)
+	creator := app.NewWalletCreator(walletRepo, wagerRepo, outboxRepo, txManager)
+	w, err := creator.Create(context.Background(), app.CreateWalletInput{
+		PlayerID: uuid.New(), InitialBalance: balance, CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+
+	submitter := app.NewWagerSubmitter(walletRepo, wagerRepo, outboxRepo, txManager)
+
+	providerID := "provider-" + uuid.New().String()
+	betExternalID := "bet-" + uuid.New().String()
+	betResult, err := submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
+		ProviderID: providerID, ExternalTransactionID: betExternalID,
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindBet, Amount: mustMoney(t, 3000),
+		CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+	require.Equal(t, wager.TxStatusProcessed, betResult.Transaction.Status())
+
+	// n=10, alternating REFUND/ROLLBACK, released simultaneously via a
+	// start gate (a channel closed only once every goroutine is already
+	// blocked on it) rather than just spawned in a loop, to maximize real
+	// interleaving instead of each goroutine getting a head start
+	// proportional to scheduling order.
+	//
+	// Honest caveat, checked by hand: against a local Postgres (sub-ms
+	// round trips), this did NOT reliably reproduce the pre-fix bug even
+	// at n=10 released this way — dozens of runs against the pre-fix code
+	// (FindReversal checked once, before any lock) still passed, because
+	// each Submit's short chain of round trips apparently completes fast
+	// enough, relative to Go's scheduler and pgxpool's connection handoff,
+	// that genuine cross-goroutine interleaving of the read-then-act
+	// window rarely happens locally. This test is kept anyway — it's a
+	// real assertion of correct behavior under real concurrency, not a
+	// no-op — but the actual guarantee against this specific race comes
+	// from the fix's mechanism itself, not from this test reliably
+	// failing without it: the duplicate check now runs inside the same
+	// per-wallet row lock (WalletRepository.FindByID's FOR UPDATE) that
+	// TestWagerSubmitterConcurrentBets already proves serializes
+	// concurrent mutations of one wallet — a reversal's reference always
+	// shares its wallet (ValidateReference requires it), so that lock
+	// serializes this check too, by the same already-proven mechanism.
+	const n = 10
+	kinds := make([]wager.Kind, n)
+	for i := range kinds {
+		if i%2 == 0 {
+			kinds[i] = wager.KindRefund
+		} else {
+			kinds[i] = wager.KindRollback
+		}
+	}
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	var wg sync.WaitGroup
+	results := make([]*app.SubmitWagerTransactionResult, n)
+	errs := make([]error, n)
+	ready.Add(n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ready.Done()
+			<-start
+			results[i], errs[i] = submitter.Submit(context.Background(), app.SubmitWagerTransactionInput{
+				ProviderID: providerID, ExternalTransactionID: uuid.New().String(),
+				PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+				Kind: kinds[i], Amount: mustMoney(t, 3000), ReferenceExternalTransactionID: &betExternalID,
+				CorrelationID: "test-correlation-id",
+			})
+		}(i)
+	}
+	ready.Wait() // every goroutine is blocked on <-start before any of them runs Submit
+	close(start)
+	wg.Wait()
+
+	processed, rejected := 0, 0
+	for i := 0; i < n; i++ {
+		require.NoError(t, errs[i])
+		require.NotNil(t, results[i])
+		switch results[i].Transaction.Status() {
+		case wager.TxStatusProcessed:
+			processed++
+		case wager.TxStatusRejected:
+			rejected++
+			assert.Equal(t, app.FailureCodeDuplicateReversal, results[i].Transaction.FailureCode())
+		default:
+			t.Fatalf("unexpected status %s", results[i].Transaction.Status())
+		}
+	}
+	assert.Equal(t, 1, processed, "exactly one of the n concurrent reversals should succeed")
+	assert.Equal(t, n-1, rejected, "every other one must be rejected as a duplicate reversal, not also succeed")
+
+	final, err := walletRepo.FindByID(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.Equal(t, balance, final.Balance(), "the BET's debit should be returned exactly once, not twice")
+
+	reconciliation, err := app.NewWalletReconciler(walletRepo, txManager).Reconcile(context.Background(), w.ID())
+	require.NoError(t, err)
+	assert.True(t, reconciliation.Consistent)
+}
+
 // TestWalletRepositoryFindByIDLocksPerRowNotGlobally is the mandatory
 // "wallets distintas processam em paralelo sem lock global" scenario,
 // proven directly against the locking primitive itself rather than via a

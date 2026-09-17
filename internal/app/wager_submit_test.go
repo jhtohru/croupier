@@ -434,3 +434,85 @@ func TestWagerSubmitterSubmitRetriesAsReplayOnInsertRace(t *testing.T) {
 	assert.Equal(t, mustAmount(t, 7000), result.Balance) // the winner's observed balance, not a second debit
 	assert.True(t, wagers.triggered)
 }
+
+// trackingTxManager is fakeTxManager plus a record of whether WithinTx is
+// currently on the call stack — lets a fake repository method tell whether
+// it was called from inside one.
+type trackingTxManager struct {
+	insideTx bool
+}
+
+func (m *trackingTxManager) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	m.insideTx = true
+	defer func() { m.insideTx = false }()
+	return fn(ctx)
+}
+
+// findReversalOrderSpy records whether FindReversal ran while a
+// trackingTxManager's WithinTx was on the call stack.
+type findReversalOrderSpy struct {
+	*fakeWagerRepository
+	txManager       *trackingTxManager
+	calledInsideTx  bool
+	calledOutsideTx bool
+}
+
+func (r *findReversalOrderSpy) FindReversal(ctx context.Context, referencedTransactionID uuid.UUID) (*wager.Transaction, error) {
+	if r.txManager.insideTx {
+		r.calledInsideTx = true
+	} else {
+		r.calledOutsideTx = true
+	}
+	return r.fakeWagerRepository.FindReversal(ctx, referencedTransactionID)
+}
+
+// TestWagerSubmitterDuplicateReversalCheckRunsInsideWalletLock is a
+// deterministic, structural regression test for §7.25/§7.26's concurrent
+// case: two reversals submitted at the exact same time must never both
+// succeed. A real race between two goroutines doesn't reliably reproduce
+// that bug against a fast local Postgres (checked by hand — see the
+// comment on TestWagerSubmitterConcurrentReversals in
+// internal/postgres/integration_test.go, the integration-level version of
+// this scenario), so this test isolates the actual mechanism instead of
+// relying on timing: FindReversal must run while the wallet's row lock
+// (TxManager.WithinTx) is held, not before it opens, since that lock is
+// what would serialize two concurrent callers in the real
+// *postgres.TxManager (FindByID takes FOR UPDATE inside a transaction).
+// Calling it beforehand — the pre-fix code — is exactly the check-then-act
+// gap that let a REFUND and a ROLLBACK both succeed against the same
+// reference under real concurrency.
+func TestWagerSubmitterDuplicateReversalCheckRunsInsideWalletLock(t *testing.T) {
+	wallets := newFakeWalletRepository()
+	outboxRepo := &fakeOutboxRepository{}
+	txManager := &trackingTxManager{}
+
+	balance, err := money.FromMinorUnits("BRL", 10000)
+	require.NoError(t, err)
+	w, err := wallet.New(uuid.New(), balance)
+	require.NoError(t, err)
+	require.NoError(t, wallets.Save(context.Background(), w))
+
+	wagers := &findReversalOrderSpy{fakeWagerRepository: &fakeWagerRepository{}, txManager: txManager}
+	submitter := NewWagerSubmitter(wallets, wagers, outboxRepo, txManager)
+
+	betResult, err := submitter.Submit(context.Background(), SubmitWagerTransactionInput{
+		ProviderID: "provider-a", ExternalTransactionID: "bet-1",
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindBet, Amount: mustAmount(t, 3000), CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+	require.Equal(t, wager.TxStatusProcessed, betResult.Transaction.Status())
+
+	refID := "bet-1"
+	result, err := submitter.Submit(context.Background(), SubmitWagerTransactionInput{
+		ProviderID: "provider-a", ExternalTransactionID: "refund-1",
+		PlayerID: w.PlayerID(), WalletID: w.ID(), RoundID: "round-1", GameID: "game-1",
+		Kind: wager.KindRefund, Amount: mustAmount(t, 3000), ReferenceExternalTransactionID: &refID,
+		CorrelationID: "test-correlation-id",
+	})
+	require.NoError(t, err)
+	require.Equal(t, wager.TxStatusProcessed, result.Transaction.Status())
+
+	assert.True(t, wagers.calledInsideTx, "FindReversal must run inside WithinTx, where the wallet lock actually serializes concurrent callers")
+	assert.False(t, wagers.calledOutsideTx, "FindReversal must not also run before WithinTx opens — that check can't prevent the race, only give a false sense that it's checked")
+}

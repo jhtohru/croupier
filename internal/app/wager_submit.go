@@ -164,13 +164,11 @@ func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction, co
 		if err := tx.ResolveReference(referenced.ID()); err != nil {
 			return nil, err
 		}
-		duplicate, err := ws.wagers.FindReversal(ctx, referenced.ID())
-		if err != nil && !errors.Is(err, ErrWagerTransactionNotFound) {
-			return nil, err
-		}
-		if duplicate != nil {
-			return ws.reject(ctx, tx, FailureCodeDuplicateReversal, correlationID)
-		}
+		// The duplicate-reversal check itself happens below, inside the
+		// wallet's row lock, not here — see the comment there for why a
+		// check at this point (before any lock is held) isn't enough to
+		// actually prevent two concurrent reversals of the same reference
+		// from both succeeding.
 	}
 
 	if tx.Kind() == wager.KindLoss {
@@ -194,6 +192,41 @@ func (ws *WagerSubmitter) process(ctx context.Context, tx *wager.Transaction, co
 		w, err := ws.wallets.FindByID(ctx, tx.WalletID())
 		if err != nil {
 			return err
+		}
+
+		// REFUND/ROLLBACK: check for a duplicate reversal now that the
+		// wallet's row lock is held, not before opening this transaction.
+		// A reversal always targets the same wallet as its reference
+		// (ValidateReference requires it), so this lock also serializes
+		// two concurrent reversals of the same reference — the earlier
+		// point in this function only resolves the reference and validates
+		// it, it can't actually prevent the race (§7.25/§7.26: two
+		// concurrent REFUND/ROLLBACK submissions on the same reference,
+		// e.g. one of each kind, must never both succeed — a check before
+		// any lock is a classic check-then-act TOCTOU: both could pass it
+		// before either commits).
+		if tx.Kind() == wager.KindRefund || tx.Kind() == wager.KindRollback {
+			duplicate, err := ws.wagers.FindReversal(ctx, referenced.ID())
+			if err != nil && !errors.Is(err, ErrWagerTransactionNotFound) {
+				return err
+			}
+			if duplicate != nil {
+				if err := tx.MarkRejected(FailureCodeDuplicateReversal); err != nil {
+					return err
+				}
+				event, err := newWagerTransactionRejectedEvent(tx, correlationID)
+				if err != nil {
+					return err
+				}
+				if err := ws.wagers.Save(ctx, tx); err != nil {
+					return err
+				}
+				if err := ws.outbox.SaveAll(ctx, event); err != nil {
+					return err
+				}
+				result = &SubmitWagerTransactionResult{Transaction: tx, Balance: w.Balance()}
+				return nil
+			}
 		}
 
 		before := w.Balance()
