@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-Decisões técnicas do croupier. Preenchido incrementalmente conforme o [TODO.md](TODO.md) avança — cada seção referencia a fase que a define.
+Decisões técnicas do croupier, documentadas conforme o projeto avançou — cada seção referencia a fase (ver [TODO.md](TODO.md)) que a define, incluindo as revisões e auditorias de conformidade feitas depois da implementação inicial.
 
 ## Visão geral
 

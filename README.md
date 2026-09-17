@@ -2,7 +2,7 @@
 
 Serviço de processamento de carteiras (wallets) e apostas (wagering) para provedores de jogos (iGaming), desenvolvido como solução do [backend-challenge-go](https://github.com/junglegaming/backend-challenge-go).
 
-> Em desenvolvimento. Progresso e escopo detalhado em [TODO.md](TODO.md).
+> Solução completa e entregue. Checklist item a item (o que foi feito, o que ficou de fora por escopo e por quê) em [TODO.md](TODO.md); decisões de arquitetura em [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Pré-requisitos
 

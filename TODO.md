@@ -6,7 +6,7 @@ Legenda:
 - `[o]` diferencial opcional (cortar primeiro se faltar tempo)
 - `[doc]` tarefa de documentação incremental (preencher a seção correspondente de README.md/ARCHITECTURE.md ao concluir a fase — não deixar tudo para o final)
 
-Prazo: entrega segunda-feira. Priorize tudo marcado `[!]` antes de qualquer `[o]`.
+Prazo original: 3 dias corridos a partir do envio do desafio (11/09), priorizando tudo marcado `[!]` antes de qualquer `[o]`. Entregue em 16/09, dentro da prorrogação solicitada por email.
 
 ---
 
