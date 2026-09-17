@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	awssqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -26,7 +27,19 @@ func provideMetrics() *metrics.Registry {
 }
 
 func providePostgresPool(cfg *Config) (*pgxpool.Pool, error) {
-	return pgxpool.New(context.Background(), cfg.PostgresDSN)
+	poolCfg, err := pgxpool.ParseConfig(cfg.PostgresDSN)
+	if err != nil {
+		return nil, err
+	}
+	// Challenge spec §6.0.10: bounds how long *establishing* a new
+	// connection can hang (network partition, Postgres unreachable) — a
+	// context-cancelled caller already bounds an individual query once
+	// connected, but nothing bounded the connection handshake itself
+	// before this. Doesn't touch query/statement execution time, so it
+	// can't interfere with an intentionally long-held row lock (e.g. the
+	// mandatory concurrency tests).
+	poolCfg.ConnConfig.ConnectTimeout = 10 * time.Second
+	return pgxpool.NewWithConfig(context.Background(), poolCfg)
 }
 
 // The five functions below exist only to declare their return type as the

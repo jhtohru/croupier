@@ -9,9 +9,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+// idpHTTPTimeout bounds every HTTP call this package makes to the IdP
+// (discovery at NewVerifier, and any on-demand JWKS refresh inside Verify)
+// — challenge spec §6.0.10. go-oidc has no client-wide default: without an
+// explicit client, both paths fall back to http.DefaultClient, which never
+// times out.
+const idpHTTPTimeout = 10 * time.Second
 
 // InternalServiceRole gates wallet operations (POST /wallets, GET
 // /wallets/*, reconciliation, and the internal wager-transaction lookup by
@@ -44,7 +53,8 @@ func (c Claims) HasRole(role string) bool {
 // the IdP's discovery document and published keys (fetched once at startup
 // via NewVerifier, cached and auto-refreshed by go-oidc internally).
 type Verifier struct {
-	verifier *oidc.IDTokenVerifier
+	verifier   *oidc.IDTokenVerifier
+	httpClient *http.Client
 }
 
 // NewVerifier discovers the OIDC provider at issuerURL (e.g.
@@ -55,11 +65,16 @@ type Verifier struct {
 // audience/client id to check against — identity comes from the providerId
 // claim and realm roles instead, checked by the caller of Verify.
 func NewVerifier(ctx context.Context, issuerURL string) (*Verifier, error) {
+	httpClient := &http.Client{Timeout: idpHTTPTimeout}
+	ctx = oidc.ClientContext(ctx, httpClient)
 	provider, err := oidc.NewProvider(ctx, issuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("auth: discovering OIDC provider at %q: %w", issuerURL, err)
 	}
-	return &Verifier{verifier: provider.Verifier(&oidc.Config{SkipClientIDCheck: true})}, nil
+	return &Verifier{
+		verifier:   provider.Verifier(&oidc.Config{SkipClientIDCheck: true}),
+		httpClient: httpClient,
+	}, nil
 }
 
 // Verify checks rawToken and extracts its claims. Any failure (malformed,
@@ -67,6 +82,12 @@ func NewVerifier(ctx context.Context, issuerURL string) (*Verifier, error) {
 // callers don't need to distinguish why a token was rejected, only that it
 // was.
 func (v *Verifier) Verify(ctx context.Context, rawToken string) (Claims, error) {
+	// go-oidc's remote key set reads its HTTP client from ctx per call, not
+	// from anything fixed at NewVerifier time — every JWKS refresh
+	// triggered from here (e.g. an unrecognized key id) needs this same
+	// timeout-bound client, or it would silently fall back to
+	// http.DefaultClient's no-timeout default.
+	ctx = oidc.ClientContext(ctx, v.httpClient)
 	idToken, err := v.verifier.Verify(ctx, rawToken)
 	if err != nil {
 		return Claims{}, fmt.Errorf("%w: %v", ErrInvalidToken, err)

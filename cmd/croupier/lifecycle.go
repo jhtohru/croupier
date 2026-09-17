@@ -41,7 +41,21 @@ func registerPostgresPool(lc fx.Lifecycle, pool *pgxpool.Pool) {
 // startup instead of surfacing later as a silent, already-backgrounded
 // goroutine's log line.
 func registerHTTPServer(lc fx.Lifecycle, srv *httpapi.Server, cfg *Config) {
-	server := &http.Server{Handler: srv}
+	server := &http.Server{
+		Handler: srv,
+		// Challenge spec §6.0.10: "Operações de I/O devem... respeitar...
+		// timeout" — ctx propagation alone (already true everywhere) only
+		// covers cancellation; without these, a slow or hung client could
+		// hold a connection (and the goroutine serving it) open
+		// indefinitely regardless of anything the handler does. Generous
+		// on purpose (this app has no large uploads/downloads or
+		// long-polling routes) — these exist to bound worst-case
+		// connection lifetime, not to be tuned per endpoint.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	lc.Append(fx.Hook{
 		OnStart: func(context.Context) error {
 			ln, err := net.Listen("tcp", ":"+cfg.AppPort)
