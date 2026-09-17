@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -177,6 +179,35 @@ func TestReconcileWallet(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.True(t, got.Consistent)
 	assert.Equal(t, 2, got.CheckedEntries)
+}
+
+func TestReconcileWalletLogsDivergence(t *testing.T) {
+	// Challenge spec §9.38: "Reporte divergências... nos logs" — not just
+	// in the response body and the metric (TestReconcileWallet above
+	// covers the consistent case; ObserveReconciliation covers the
+	// metric).
+	prevLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	walletID := uuid.New()
+	result := &app.ReconciliationResult{
+		WalletID:          walletID,
+		StoredBalance:     mustMoney(t, "100.00"),
+		CalculatedBalance: mustMoney(t, "90.00"),
+		Difference:        mustMoney(t, "10.00"),
+		Consistent:        false,
+		EntriesChecked:    2,
+	}
+	srv := NewServer(Deps{Auth: internalAuth(), WalletReconciler: stubWalletReconciler{result: result}})
+
+	rec := doRequest(t, srv, http.MethodPost, "/wallets/"+walletID.String()+"/reconciliation", nil)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	logLine := logs.String()
+	assert.Contains(t, logLine, "reconciliation found a divergence")
+	assert.Contains(t, logLine, walletID.String())
 }
 
 func TestListWalletLedger(t *testing.T) {

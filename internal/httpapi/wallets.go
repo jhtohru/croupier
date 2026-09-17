@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -99,6 +100,16 @@ func (h *handler) reconcileWallet(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.deps.Metrics != nil {
 		h.deps.Metrics.ObserveReconciliation(result.Consistent, result.Difference.Amount())
+	}
+	if !result.Consistent {
+		// Challenge spec §9.38: "Reporte divergências... nos logs" — the
+		// difference amount is exactly what this report is about (unlike
+		// Fase 11's "sem payloads financeiros completos" convention
+		// elsewhere), so it's deliberately included here, not omitted.
+		slog.WarnContext(r.Context(), "httpapi: reconciliation found a divergence",
+			"walletId", walletID, "correlationId", correlationIDFromContext(r.Context()),
+			"storedBalance", result.StoredBalance, "calculatedBalance", result.CalculatedBalance,
+			"difference", result.Difference, "checkedEntries", result.EntriesChecked)
 	}
 	writeJSON(w, http.StatusOK, reconciliationResponse{
 		WalletID:          result.WalletID,
