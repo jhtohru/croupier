@@ -1,7 +1,7 @@
 //go:build integration
 
 // Challenge spec §13.15 ("Verifique constraints") and §13.16 ("Verifique
-// imutabilidade do ledger"): the schema's CHECK constraints and the
+// imutabilidade do ledger"): the schema's CHECK/UNIQUE constraints and the
 // wallet_ledger_entries immutability trigger were previously only verified
 // once, by hand, against a real Postgres (see ARCHITECTURE.md) — never as a
 // repeatable go test. This file exercises them directly with raw SQL,
@@ -49,6 +49,22 @@ func TestWalletsTableConstraints(t *testing.T) {
 
 	t.Run("a valid row is accepted", func(t *testing.T) {
 		assert.NoError(t, insertWallet(0, 1))
+	})
+
+	t.Run("wallets_player_currency_unique rejects a second wallet for the same player+currency", func(t *testing.T) {
+		playerID := uuid.New()
+		_, err := pool.Exec(ctx, `
+			INSERT INTO wallets (id, player_id, currency, balance, version, created_at, updated_at)
+			VALUES ($1, $2, 'BRL', 0, 1, now(), now())
+		`, uuid.New(), playerID)
+		require.NoError(t, err)
+
+		_, err = pool.Exec(ctx, `
+			INSERT INTO wallets (id, player_id, currency, balance, version, created_at, updated_at)
+			VALUES ($1, $2, 'BRL', 0, 1, now(), now())
+		`, uuid.New(), playerID)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "wallets_player_currency_unique")
 	})
 }
 
@@ -112,5 +128,23 @@ func TestWalletLedgerEntriesTableConstraints(t *testing.T) {
 		_, err = pool.Exec(ctx, `DELETE FROM wallet_ledger_entries WHERE id = $1`, id)
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "append-only")
+	})
+
+	t.Run("wallet_ledger_entries_wallet_transaction_unique rejects a second entry for the same wallet+transaction", func(t *testing.T) {
+		// insertEntry always generates a fresh transaction_id, so build
+		// both inserts by hand here to collide on purpose.
+		transactionID := uuid.New()
+		_, err := pool.Exec(ctx, `
+			INSERT INTO wallet_ledger_entries (id, wallet_id, transaction_id, direction, amount, balance_before, balance_after, created_at)
+			VALUES ($1, $2, $3, 'CREDIT', 500, 1000, 1500, now())
+		`, uuid.New(), w.ID(), transactionID)
+		require.NoError(t, err) // first insert for this transactionID succeeds
+
+		_, err = pool.Exec(ctx, `
+			INSERT INTO wallet_ledger_entries (id, wallet_id, transaction_id, direction, amount, balance_before, balance_after, created_at)
+			VALUES ($1, $2, $3, 'CREDIT', 500, 1000, 1500, now())
+		`, uuid.New(), w.ID(), transactionID)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "wallet_ledger_entries_wallet_transaction_unique")
 	})
 }
