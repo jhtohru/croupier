@@ -51,7 +51,7 @@ func newWagerTransactionProcessedEvent(tx *wager.Transaction, correlationID stri
 		EventType:     EventTypeWagerTransactionProcessed,
 		Version:       eventEnvelopeVersion,
 		Payload:       payload,
-		OccurredAt:    time.Now(),
+		OccurredAt:    time.Now().UTC(),
 		CorrelationID: correlationID,
 	})
 }
@@ -77,7 +77,7 @@ func newWagerTransactionRejectedEvent(tx *wager.Transaction, correlationID strin
 		EventType:     EventTypeWagerTransactionRejected,
 		Version:       eventEnvelopeVersion,
 		Payload:       payload,
-		OccurredAt:    time.Now(),
+		OccurredAt:    time.Now().UTC(),
 		CorrelationID: correlationID,
 	})
 }
@@ -105,7 +105,7 @@ func newWagerTransactionPendingReferenceEvent(tx *wager.Transaction, correlation
 		EventType:     EventTypeWagerTransactionPendingReference,
 		Version:       eventEnvelopeVersion,
 		Payload:       payload,
-		OccurredAt:    time.Now(),
+		OccurredAt:    time.Now().UTC(),
 		CorrelationID: correlationID,
 	})
 }
@@ -147,7 +147,7 @@ func newWalletBalanceChangedEvent(w *wallet.Wallet, entry *wallet.LedgerEntry, c
 		EventType:     EventTypeWalletBalanceChanged,
 		Version:       eventEnvelopeVersion,
 		Payload:       payload,
-		OccurredAt:    time.Now(),
+		OccurredAt:    time.Now().UTC(),
 		CorrelationID: correlationID,
 		CausationID:   causationID,
 	})

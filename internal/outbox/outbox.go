@@ -66,7 +66,7 @@ func NewEntry(input NewEntryInput) (*Entry, error) {
 		input.CorrelationID == "" {
 		return nil, ErrInvalidInput
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	return &Entry{
 		id:            uuid.New(),
 		aggregateType: input.AggregateType,
